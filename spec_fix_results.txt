@@ -1,0 +1,79 @@
+TAG EDITOR SPEC COMPLIANCE FIX RESULTS — v2.0.0
+=================================================================
+Date: 2026-05-01
+Fixes applied: 13 issues from SPEC_AUDIT.md
+
+FIXES IMPLEMENTED:
+  CRITICAL:
+    #1 OGG multi-page comment write: Track commentPageCount in parseOggComments,
+       skip correct number of original pages in writeOggComments instead of always 2.
+       seqDelta now = newPages.length - origCommentPages.
+    #2 ID3 extended header: Check flags bit 6, skip v2.3 ext header (4+size bytes)
+       or v2.4 ext header (synchsafe size, includes itself).
+    #3 ID3 unsynchronisation: v2.3 tag-level unsync reversed (FF 00 → FF) on entire
+       tag data block before frame parsing. v2.4 per-frame unsync reversed when
+       frame flag bit 1 is set.
+
+  MAJOR:
+    #4 ID3 v2.3→v2.4 upgrade: writeId3 now writes ID3v2.4 header with synchsafe
+       frame sizes. UTF-8 encoding byte (3) is valid in v2.4.
+    #5 Opus pre-skip: Duration now subtracts pre-skip from OpusHead offset 10-11
+       (uint16le) per RFC 7845 §4.
+    #6 MP3 MPEG2 bitrates: Added BITRATES_V2_L3 table [0,8,16,24,32,40,...,160,0].
+       Selected based on mpegVer.
+    #7 MP3 MPEG2 sample rates: Added SRATES_V2 [22050,24000,16000,0] and
+       SRATES_V25 [11025,12000,8000,0]. Selected based on mpegVer.
+    #8 ID3v2.4 footer: headerSize += 10 when flags bit 4 set (footer present).
+    #9 M4A extended atom size: atomAt and walkAtoms handle size=1 (64-bit largesize)
+       and size=0 (extends to EOF). Applied to both parseM4a and writeM4a/stco patching.
+    #10 FLAC PICTURE blocks: writeFlacWithArt now only removes picType=3 (front cover).
+        Back cover (4), artist (8), etc. preserved.
+    #11 ID3 frame flags: Compression (4-byte decompressed size skip), encryption
+        (skip frame), grouping (1 byte skip) handled for both v2.3 and v2.4.
+
+  MINOR:
+    #12 MP3 layer validation: Extract layer bits, skip reserved (layer=0) and
+        validate before using bitrate table. mpegVer=1 (reserved) also skipped.
+    #13 M4A atom size=0: Handled as "extends to EOF" (size = endOff - off).
+    #15 VBRI comment: Updated to accurate offset description.
+
+NOT FIXED (intentional):
+    #14 ID3 v2.4→v2.3 downgrade: Now moot — writeId3 always writes v2.4.
+    #16 OGG uppercase: Spec-compliant behavior, kept as-is.
+    #17 M4A first trak only: Low impact for .m4a files, deferred.
+    #18 Opus channels: Already correct (offset 9).
+    #19 Opus sample rate display: Informational, deferred.
+
+=================================================================
+TEST RESULTS — EDGE CASE FILES
+=================================================================
+
+Synthetic test files created in /tmp/tag-spec-test/:
+  - test_unsync.mp3: ID3v2.3 with tag-level unsynchronisation (FF E0 bytes in TXXX)
+  - test_ext_header.mp3: ID3v2.3 with extended header flag set
+  - test_v24_footer.mp3: ID3v2.4 with 10-byte footer
+  - test_ogg.ogg: OGG Vorbis with 65KB embedded art (forces multi-page comment packet)
+  - test_multi_pic.flac: FLAC with front cover (type 3) + back cover (type 4)
+
+LOAD TESTS (Playwright, all pass):
+  [PASS] ID3 extended header: 2 tags parsed correctly (TIT2, TPE1)
+  [PASS] ID3 v2.3 unsync: 2 tags parsed (TIT2 correct, TXXX with FF bytes read)
+  [PASS] ID3 v2.4 footer: 2 tags parsed (TIT2, TPE1), audio not corrupted
+  [PASS] OGG large art (multi-page): 3 tags loaded, art displayed
+  [PASS] FLAC multi-picture: 3 tags loaded, front cover displayed
+
+ROUND-TRIP TESTS (Playwright save + mutagen verify, all pass):
+  [PASS] OGG large art: title modified, art preserved (65,299 bytes)
+  [PASS] FLAC multi-picture: title modified, back cover type 4 preserved alongside front cover type 3
+  [PASS] MP3 ext header: title modified, saved file valid per mutagen
+  [PASS] MP3 v2.4 footer: title modified, duration=1.0s (audio intact)
+  [PASS] MP3 unsync: title modified, saved file valid per mutagen
+
+REAL FILE ROUND-TRIPS (delta-picks, all pass):
+  [PASS] MP3 (Despacito Camellia Remix): duration=87.9s
+  [PASS] FLAC (Cookie From Space): duration=619.7s
+  [PASS] OGG (Bloody Good Rogering): duration=255.1s
+  [PASS] M4A (Herbert the Pervert): duration=437.5s
+
+TOTAL: 14/14 tests passed, 0 failures
+No JS errors detected in any test.
