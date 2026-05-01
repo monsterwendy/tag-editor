@@ -184,31 +184,64 @@
 </div>
 
 <script>
+// =====================================================================
+// Tag Editor — Client-side audio metadata editor
+//
+// Supports: FLAC, MP3 (ID3v2), M4A/AAC/ALAC (iTunes atoms),
+//           OGG Vorbis, and Opus. All parsing and serialization
+//           happens in pure JavaScript with no external libraries.
+// =====================================================================
+
+/** @type {File|null} The currently loaded audio file object */
 let currentFile = null;
+/** @type {ArrayBuffer|null} Raw binary contents of the loaded file */
 let currentBuffer = null;
+/** @type {string|null} Detected format: 'flac', 'mp3', 'm4a', 'ogg', or 'opus' */
 let currentFormat = null;
+/** @type {Object|null} Format-specific parsed metadata used by the corresponding write function */
 let parsedMeta = null;
 
 // =====================
 // FLAC Vorbis Comments
 // =====================
+//
+// FLAC files consist of a 4-byte magic "fLaC" followed by a chain of metadata
+// blocks (STREAMINFO, PADDING, SEEKTABLE, VORBIS_COMMENT, PICTURE, etc.).
+// Each block has a 4-byte header: bit 0 = is-last flag, bits 1-7 = block type,
+// bits 8-31 = block length. Type 4 is VORBIS_COMMENT which uses the same
+// Vorbis comment format as OGG — a vendor string followed by KEY=value pairs,
+// all length-prefixed as little-endian uint32.
 
+/**
+ * Parse FLAC metadata to extract Vorbis comment tags.
+ *
+ * Walks the metadata block chain looking for block type 4 (VORBIS_COMMENT).
+ * Returns enough positional info for writeFlac to splice in a replacement block.
+ *
+ * @param {ArrayBuffer} buffer - Raw FLAC file bytes
+ * @returns {{ tags: [string, string][], vendorString: string, blockOffset: number, blockLength: number, isLast: boolean }}
+ */
 function parseFlac(buffer) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
 
+  // Verify "fLaC" magic at offset 0
   if (bytes[0] !== 0x66 || bytes[1] !== 0x4C || bytes[2] !== 0x61 || bytes[3] !== 0x43)
     throw new Error('Not a FLAC file');
 
-  let offset = 4;
+  let offset = 4; // skip past the 4-byte magic
   while (offset + 4 <= buffer.byteLength) {
     const blockHeader = bytes[offset];
-    const isLast = !!(blockHeader & 0x80);
-    const blockType = blockHeader & 0x7F;
+    const isLast = !!(blockHeader & 0x80);   // top bit signals last block in chain
+    const blockType = blockHeader & 0x7F;    // lower 7 bits = block type
     const blockLength = (bytes[offset+1] << 16) | (bytes[offset+2] << 8) | bytes[offset+3];
-    const dataOff = offset + 4;
+    const dataOff = offset + 4;              // block data begins after the 4-byte header
 
-    if (blockType === 4) { // VORBIS_COMMENT
+    if (blockType === 4) { // VORBIS_COMMENT block
+      // Vorbis comment layout:
+      //   uint32le vendor_length → vendor_string
+      //   uint32le comment_count
+      //   for each comment: uint32le length → "KEY=value" UTF-8 string
       const dec = new TextDecoder('utf-8');
       let pos = dataOff;
       const vendorLen = view.getUint32(pos, true); pos += 4;
@@ -224,42 +257,57 @@ function parseFlac(buffer) {
       return { tags, vendorString, blockOffset: offset, blockLength, isLast };
     }
 
-    offset += 4 + blockLength;
+    offset += 4 + blockLength; // advance past this block's header + data
     if (isLast) break;
   }
   // No Vorbis Comment block found — return empty meta so we can create one
   return { tags: [], vendorString: 'Wendy Tag Editor', blockOffset: -1, blockLength: 0, isLast: false };
 }
 
+/**
+ * Write modified tags back into a FLAC file.
+ *
+ * Rebuilds only the VORBIS_COMMENT block — all other metadata blocks
+ * (STREAMINFO, SEEKTABLE, PICTURE, etc.) are preserved byte-for-byte.
+ * If the file had no comment block, one is inserted after STREAMINFO.
+ *
+ * @param {ArrayBuffer} buffer - Original FLAC file bytes
+ * @param {[string, string][]} tags - Key-value tag pairs to write
+ * @param {Object} meta - Metadata from parseFlac (block position, vendor, etc.)
+ * @returns {ArrayBuffer} Complete new FLAC file with updated tags
+ */
 function writeFlac(buffer, tags, meta) {
   const enc = new TextEncoder();
   const { vendorString, blockOffset, blockLength, isLast } = meta;
 
+  // Encode all tags as "KEY=value" UTF-8 byte arrays
   const vendorBytes = enc.encode(vendorString);
   const encoded = tags.filter(([k]) => k.trim()).map(([k, v]) => enc.encode(k.toUpperCase() + '=' + v));
 
-  let newDataSize = 4 + vendorBytes.length + 4;
-  for (const c of encoded) newDataSize += 4 + c.length;
+  // Calculate new Vorbis comment data size (excluding the 4-byte block header)
+  let newDataSize = 4 + vendorBytes.length + 4; // vendor_length + vendor + comment_count
+  for (const c of encoded) newDataSize += 4 + c.length; // length-prefix + comment bytes
 
   if (blockOffset === -1) {
     // No existing Vorbis Comment block — insert one after STREAMINFO (first block)
     const bytes = new Uint8Array(buffer);
-    let insertPos = 4; // right after "fLaC"
-    // Skip STREAMINFO block
+    let insertPos = 4; // right after "fLaC" magic
+    // STREAMINFO is always the first block; read its length to skip past it
     const siLen = (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
     const siWasLast = !!(bytes[4] & 0x80);
     insertPos += 4 + siLen;
-    // Clear "last block" flag on STREAMINFO if it was set
-    const newTotal = 4 + newDataSize;
+    const newTotal = 4 + newDataSize; // 4-byte block header + block data
     const out = new Uint8Array(buffer.byteLength + newTotal);
     const outView = new DataView(out.buffer);
+    // Copy everything up to the insertion point (fLaC magic + STREAMINFO)
     out.set(new Uint8Array(buffer, 0, insertPos));
-    if (siWasLast) out[4] = out[4] & 0x7F; // clear last-block on STREAMINFO
-    // Write new Vorbis Comment block (mark as last if STREAMINFO was last)
-    out[insertPos] = (siWasLast ? 0x80 : 0x00) | 4;
+    if (siWasLast) out[4] = out[4] & 0x7F; // clear is-last flag on STREAMINFO
+    // Write new VORBIS_COMMENT block header (inherit is-last from STREAMINFO if needed)
+    out[insertPos] = (siWasLast ? 0x80 : 0x00) | 4; // type 4 = VORBIS_COMMENT
     out[insertPos + 1] = (newDataSize >> 16) & 0xFF;
     out[insertPos + 2] = (newDataSize >> 8) & 0xFF;
     out[insertPos + 3] = newDataSize & 0xFF;
+    // Write vendor string and comments in Vorbis comment format
     let pos = insertPos + 4;
     outView.setUint32(pos, vendorBytes.length, true); pos += 4;
     out.set(vendorBytes, pos); pos += vendorBytes.length;
@@ -268,22 +316,27 @@ function writeFlac(buffer, tags, meta) {
       outView.setUint32(pos, c.length, true); pos += 4;
       out.set(c, pos); pos += c.length;
     }
+    // Append remainder of original file (everything after STREAMINFO)
     out.set(new Uint8Array(buffer, insertPos), pos);
     return out.buffer;
   }
 
-  const oldTotal = 4 + blockLength;
-  const newTotal = 4 + newDataSize;
+  // Replace existing Vorbis Comment block in-place
+  const oldTotal = 4 + blockLength;   // old block header + data
+  const newTotal = 4 + newDataSize;   // new block header + data
   const out = new Uint8Array(buffer.byteLength - oldTotal + newTotal);
   const outView = new DataView(out.buffer);
 
+  // Copy everything before the comment block
   out.set(new Uint8Array(buffer, 0, blockOffset));
 
+  // Write new block header, preserving the is-last flag
   out[blockOffset] = (isLast ? 0x80 : 0x00) | 4;
   out[blockOffset + 1] = (newDataSize >> 16) & 0xFF;
   out[blockOffset + 2] = (newDataSize >> 8) & 0xFF;
   out[blockOffset + 3] = newDataSize & 0xFF;
 
+  // Write vendor string + comments
   let pos = blockOffset + 4;
   outView.setUint32(pos, vendorBytes.length, true); pos += 4;
   out.set(vendorBytes, pos); pos += vendorBytes.length;
@@ -293,6 +346,7 @@ function writeFlac(buffer, tags, meta) {
     out.set(c, pos); pos += c.length;
   }
 
+  // Append everything after the old comment block
   out.set(new Uint8Array(buffer, blockOffset + oldTotal), pos);
   return out.buffer;
 }
@@ -300,6 +354,13 @@ function writeFlac(buffer, tags, meta) {
 // ==========
 // ID3 frame ID ↔ friendly display name
 // ==========
+//
+// ID3v2 uses cryptic 4-character frame IDs (TIT2, TPE1, TALB, etc.).
+// This map translates them to human-readable labels for display in the UI.
+// The reverse map (ID3_FROM_DISPLAY) is used when saving — display names
+// typed by the user are translated back to proper frame IDs.
+
+/** @type {Object.<string, string>} Maps ID3v2 frame IDs to human-readable display names */
 const ID3_DISPLAY = {
   TIT2: 'TITLE',        TALB: 'ALBUM',        TPE1: 'ARTIST',
   TPE2: 'ALBUMARTIST',  TRCK: 'TRACKNUMBER',  TPOS: 'DISCNUMBER',
@@ -311,12 +372,24 @@ const ID3_DISPLAY = {
   USLT: 'LYRICS',       TIT1: 'GROUPING',     TIT3: 'SUBTITLE',
   TPE4: 'REMIXER',      TMOO: 'MOOD',         TMED: 'MEDIATYPE',
 };
+/** @type {Object.<string, string>} Reverse map: display names → frame IDs (for saving) */
 const ID3_FROM_DISPLAY = Object.fromEntries(Object.entries(ID3_DISPLAY).map(([k,v])=>[v,k]));
 
 // ==========
 // M4A / iTunes atoms
 // ==========
+//
+// M4A files use the ISO Base Media File Format (ISOBMFF / MP4). Metadata lives
+// in the atom tree: moov → udta → meta → ilst. Each tag is a child atom of ilst
+// with a 4-byte type code (e.g. ©nam, ©ART, trkn) containing a 'data' sub-atom.
+// The 'data' atom has a type indicator (1 = UTF-8 text, 0x15 = integer) followed
+// by 4 bytes of locale (always 0) and then the actual value bytes.
+//
+// For custom/non-standard tags, iTunes uses "freeform" atoms with type '----'
+// containing 'mean' (namespace, usually "com.apple.iTunes"), 'name' (field name),
+// and 'data' (value) sub-atoms.
 
+/** @type {Object.<string, string>} Maps M4A/iTunes atom type codes to human-readable names */
 const M4A_ATOM_MAP = {
   '\u00a9nam': 'TITLE',      // ©nam
   '\u00a9ART': 'ARTIST',     // ©ART
@@ -332,20 +405,44 @@ const M4A_ATOM_MAP = {
   'disk':      'DISCNUMBER',
   'tmpo':      'BPM',
 };
+/** @type {Object.<string, string>} Reverse map: display names → atom type codes (for writing) */
 const M4A_REVERSE_MAP = Object.fromEntries(Object.entries(M4A_ATOM_MAP).map(([k,v])=>[v,k]));
 
+/**
+ * Parse M4A/MP4 metadata by walking the atom tree to find tag values.
+ *
+ * Navigates: moov → udta → meta → ilst, then iterates child atoms in ilst.
+ * Known atom types (©nam, ©ART, etc.) are mapped to friendly names.
+ * Unknown '----' freeform atoms are parsed for their 'name' and 'data' sub-atoms.
+ *
+ * @param {ArrayBuffer} buffer - Raw M4A file bytes
+ * @returns {{ tags: [string, string][], ilstInfo: Object|null }} Tags and positional info for writing
+ */
 function parseM4a(buffer) {
   const view = new DataView(buffer);
   const dec = new TextDecoder('latin1');
 
+  /**
+   * Read an atom header at the given offset.
+   * Every MP4 atom is: [4 bytes size][4 bytes type][...data].
+   * @param {number} offset - Byte offset in buffer
+   * @returns {{ type: string, start: number, size: number, data: number }|null}
+   */
   function atomAt(offset) {
     if (offset + 8 > buffer.byteLength) return null;
-    const size = view.getUint32(offset, false);
+    const size = view.getUint32(offset, false); // big-endian
     const type = dec.decode(new Uint8Array(buffer, offset+4, 4));
     if (size < 8) return null;
     return { type, start: offset, size, data: offset+8 };
   }
 
+  /**
+   * Search for a child atom of the given name within a byte range.
+   * @param {number} start - Start of search range
+   * @param {number} end - End of search range
+   * @param {string} name - 4-char atom type to find
+   * @returns {Object|null} The found atom, or null
+   */
   function findIn(start, end, name) {
     let off = start;
     while (off + 8 <= end) {
@@ -357,16 +454,18 @@ function parseM4a(buffer) {
     return null;
   }
 
+  // Walk the atom tree: moov → udta → meta → ilst
   const moov = findIn(0, buffer.byteLength, 'moov');
   if (!moov) return { tags: [], ilstInfo: null };
   const udta = findIn(moov.data, moov.start+moov.size, 'udta');
   if (!udta) return { tags: [], ilstInfo: null };
   const meta = findIn(udta.data, udta.start+udta.size, 'meta');
   if (!meta) return { tags: [], ilstInfo: null };
-  const metaData = meta.data + 4; // full box: skip version/flags
+  const metaData = meta.data + 4; // 'meta' is a "full box" — skip 4 bytes of version+flags
   const ilst = findIn(metaData, meta.start+meta.size, 'ilst');
   if (!ilst) return { tags: [], ilstInfo: { moov, udta, meta, metaData, ilst: null } };
 
+  // Iterate child atoms inside 'ilst' to extract tag values
   const tags = [];
   let off = ilst.data;
   while (off + 8 <= ilst.start + ilst.size) {
@@ -374,31 +473,37 @@ function parseM4a(buffer) {
     if (!child) break;
     const friendly = M4A_ATOM_MAP[child.type];
     if (friendly) {
+      // Standard iTunes atom — find its 'data' sub-atom
       const data = findIn(child.data, child.start+child.size, 'data');
       if (data && data.size >= 16) {
-        const ti = view.getUint32(data.data, false);
-        const cStart = data.data + 8;
+        // Data atom layout: [4 bytes type indicator][4 bytes locale][...content]
+        const ti = view.getUint32(data.data, false); // type indicator
+        const cStart = data.data + 8;                // content starts after type + locale
         const cLen = (data.start + data.size) - cStart;
         let val = '';
         if (ti === 1) {
+          // Type 1 = UTF-8 text
           val = new TextDecoder('utf-8').decode(new Uint8Array(buffer, cStart, cLen));
         } else if (ti === 0x15 && cLen >= 6) {
+          // Type 0x15 = integer; trkn/disk use: [2 pad][2 num][2 total][2 pad]
           const num = view.getUint16(cStart+2, false);
           const tot = view.getUint16(cStart+4, false);
           val = tot > 0 ? `${num}/${tot}` : `${num}`;
         } else if (ti === 0x15 && cLen === 2) {
+          // Simple 16-bit integer (e.g. tmpo/BPM)
           val = String(view.getUint16(cStart, false));
         }
         if (val) tags.push([friendly, val]);
       }
     } else if (child.type === '----') {
-      // iTunes freeform atom: ----:mean:name
+      // iTunes freeform atom for custom metadata
+      // Structure: ---- container → 'mean' atom (namespace) + 'name' atom (key) + 'data' atom (value)
       const nameAtom = findIn(child.data, child.start+child.size, 'name');
       const dataAtom = findIn(child.data, child.start+child.size, 'data');
       if (nameAtom && dataAtom && dataAtom.size >= 16) {
-        const nameLen = nameAtom.size - 12; // 8 header + 4 flags
+        const nameLen = nameAtom.size - 12; // subtract header(8) + flags(4)
         const fieldName = new TextDecoder('utf-8').decode(new Uint8Array(buffer, nameAtom.data + 4, nameLen));
-        const cStart = dataAtom.data + 8;
+        const cStart = dataAtom.data + 8; // skip type indicator + locale
         const cLen = (dataAtom.start + dataAtom.size) - cStart;
         const val = new TextDecoder('utf-8').decode(new Uint8Array(buffer, cStart, cLen));
         if (fieldName && val) tags.push([fieldName, val]);
@@ -410,98 +515,133 @@ function parseM4a(buffer) {
   return { tags, ilstInfo: { moov, udta, meta, metaData, ilst } };
 }
 
+/**
+ * Write modified tags back into an M4A file.
+ *
+ * Rebuilds the entire ilst atom with new tag values, then splices it back into
+ * the file. Parent atom sizes (moov, udta, meta) are patched to account for
+ * any size difference. Known tags use standard iTunes atom types; unknown keys
+ * are stored as '----' freeform atoms under the com.apple.iTunes namespace.
+ *
+ * @param {ArrayBuffer} buffer - Original M4A file bytes
+ * @param {[string, string][]} tags - Key-value tag pairs to write
+ * @param {Object} ilstInfo - Positional metadata from parseM4a
+ * @returns {ArrayBuffer} Complete new M4A file with updated tags
+ */
 function writeM4a(buffer, tags, ilstInfo) {
   if (!ilstInfo || !ilstInfo.ilst) throw new Error('No ilst atom found in M4A');
   const { moov, udta, meta, ilst } = ilstInfo;
   const enc = new TextEncoder();
 
+  /**
+   * Encode a string as Latin-1 bytes (for atom type codes like ©nam that use
+   * characters outside ASCII but within Latin-1).
+   * @param {string} s
+   * @returns {Uint8Array}
+   */
   function encLatin1(s) {
     const out = new Uint8Array(s.length);
     for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xFF;
     return out;
   }
 
+  // Build serialized atom bytes for each tag
   const atoms = [];
   for (const [key, value] of tags) {
     const atomType = M4A_REVERSE_MAP[key.toUpperCase().trim()];
 
     if (!atomType) {
-      // Unknown key: write as iTunes freeform atom ----:com.apple.iTunes:FIELDNAME
+      // ---- Freeform atom for custom/unknown tags ----
+      // Structure: [---- container]
+      //   → [mean] atom: namespace (always "com.apple.iTunes")
+      //   → [name] atom: field name
+      //   → [data] atom: UTF-8 value
       const meanStr = 'com.apple.iTunes';
       const nameStr = key.trim();
       const meanBytes = enc.encode(meanStr);
       const nameBytes = enc.encode(nameStr);
       const valueBytes = enc.encode(value);
-      // mean atom: size(4) + 'mean'(4) + flags(4) + content
-      const meanSize = 8 + 4 + meanBytes.length;
-      // name atom: size(4) + 'name'(4) + flags(4) + content
-      const nameSize = 8 + 4 + nameBytes.length;
-      // data atom: size(4) + 'data'(4) + type(4) + locale(4) + content
-      const dataSize = 8 + 4 + 4 + valueBytes.length;
-      const totalSize = 8 + meanSize + nameSize + dataSize;
+      const meanSize = 8 + 4 + meanBytes.length;    // header + flags + content
+      const nameSize = 8 + 4 + nameBytes.length;    // header + flags + content
+      const dataSize = 8 + 4 + 4 + valueBytes.length; // header + type + locale + content
+      const totalSize = 8 + meanSize + nameSize + dataSize; // ---- header + children
       const child = new Uint8Array(totalSize);
       const cv = new DataView(child.buffer);
       let p = 0;
+      // ---- container header
       cv.setUint32(p, totalSize, false); child.set(enc.encode('----'), p+4); p += 8;
+      // mean sub-atom (flags at +8 are zero)
       cv.setUint32(p, meanSize, false); child.set(enc.encode('mean'), p+4);
-      // flags = 0
       child.set(meanBytes, p + 12); p += meanSize;
+      // name sub-atom (flags at +8 are zero)
       cv.setUint32(p, nameSize, false); child.set(enc.encode('name'), p+4);
       child.set(nameBytes, p + 12); p += nameSize;
+      // data sub-atom
       cv.setUint32(p, dataSize, false); child.set(enc.encode('data'), p+4);
-      cv.setUint32(p + 8, 1, false); // type = UTF-8
+      cv.setUint32(p + 8, 1, false); // type indicator: 1 = UTF-8
       child.set(valueBytes, p + 16); p += dataSize;
       atoms.push(child);
       continue;
     }
 
+    // ---- Standard iTunes atom ----
+    // Each tag atom is: [outer atom: type=©nam etc.]
+    //   → [data sub-atom: type indicator + locale(0) + content bytes]
     let content, ti;
     if (atomType === 'trkn' || atomType === 'disk') {
+      // Track/disc numbers: 8-byte binary — [2 pad][2 number][2 total][2 pad]
       const parts = value.split('/');
       const num = parseInt(parts[0]) || 0, tot = parseInt(parts[1]) || 0;
       content = new Uint8Array(8);
       const dv = new DataView(content.buffer);
       dv.setUint16(2, num, false); dv.setUint16(4, tot, false);
-      ti = 21;
+      ti = 21; // type indicator for implicit integer
     } else if (atomType === 'tmpo') {
+      // BPM: 16-bit big-endian integer
       content = new Uint8Array(2);
       new DataView(content.buffer).setUint16(0, parseInt(value)||0, false);
-      ti = 0x15;
+      ti = 0x15; // integer type
     } else {
+      // Default: UTF-8 text
       content = enc.encode(value); ti = 1;
     }
 
     const typeBytes = encLatin1(atomType);
-    const dataAtomSize = 8 + 4 + 4 + content.length;
-    const childSize = 8 + dataAtomSize;
+    const dataAtomSize = 8 + 4 + 4 + content.length; // header + type + locale + content
+    const childSize = 8 + dataAtomSize;               // outer atom header + data atom
     const child = new Uint8Array(childSize);
     const cv = new DataView(child.buffer);
-    cv.setUint32(0, childSize, false);
-    child.set(typeBytes, 4);
-    cv.setUint32(8, dataAtomSize, false);
-    child.set(enc.encode('data'), 12);
-    cv.setUint32(16, ti, false); // type indicator
-    // locale already 0
-    child.set(content, 24);
+    cv.setUint32(0, childSize, false);        // outer atom size
+    child.set(typeBytes, 4);                  // outer atom type (e.g. ©nam)
+    cv.setUint32(8, dataAtomSize, false);     // data atom size
+    child.set(enc.encode('data'), 12);        // data atom type
+    cv.setUint32(16, ti, false);              // type indicator
+    // locale bytes 20-23 are already zero (Uint8Array default)
+    child.set(content, 24);                   // actual tag value
     atoms.push(child);
   }
 
+  // Rebuild the ilst atom and splice it into the file
   const newIlstContent = atoms.reduce((sum, a) => sum + a.length, 0);
-  const newIlstSize = 8 + newIlstContent;
-  const diff = newIlstSize - ilst.size;
+  const newIlstSize = 8 + newIlstContent; // ilst header + all child atoms
+  const diff = newIlstSize - ilst.size;    // size delta for patching parent atoms
 
   const out = new Uint8Array(buffer.byteLength + diff);
   const ov = new DataView(out.buffer);
 
+  // Copy everything before the old ilst
   out.set(new Uint8Array(buffer, 0, ilst.start));
   let pos = ilst.start;
+  // Write new ilst header
   ov.setUint32(pos, newIlstSize, false);
   out.set(new TextEncoder().encode('ilst'), pos+4);
   pos += 8;
+  // Write all tag atoms
   for (const a of atoms) { out.set(a, pos); pos += a.length; }
+  // Copy everything after the old ilst
   out.set(new Uint8Array(buffer, ilst.start + ilst.size), pos);
 
-  // Patch parent sizes
+  // Patch parent container sizes to reflect the new ilst size
   ov.setUint32(moov.start, moov.size + diff, false);
   ov.setUint32(udta.start, udta.size + diff, false);
   ov.setUint32(meta.start, meta.size + diff, false);
@@ -512,8 +652,35 @@ function writeM4a(buffer, tags, ilstInfo) {
 // =====================
 // OGG Vorbis / Opus
 // =====================
+//
+// OGG is a container format using a page-based structure. Each page starts with
+// "OggS" magic (4 bytes) followed by a fixed 23-byte header and a variable-length
+// segment table. Pages carry one or more "packets" (codec-specific data).
+//
+// Page header layout (27 bytes + segment table):
+//   [0-3]   "OggS" magic
+//   [4]     version (always 0)
+//   [5]     header type flags (0x01=continuation, 0x02=BOS, 0x04=EOS)
+//   [6-13]  granule position (int64le) — codec-defined timestamp
+//   [14-17] serial number (uint32le) — identifies the logical stream
+//   [18-21] page sequence number (uint32le)
+//   [22-25] CRC32 checksum (uint32le, polynomial 0x04C11DB7)
+//   [26]    number of segments
+//   [27..]  segment table (1 byte per segment, values 0-255)
+//
+// The segment table encodes packet boundaries: a segment value of 255 means
+// the packet continues into the next segment; any value < 255 ends the packet.
+// This allows packets to span multiple pages.
+//
+// For Vorbis, the first 3 pages contain the identification header (\x01vorbis),
+// comment header (\x03vorbis), and setup header. For Opus, page 0 has OpusHead
+// and page 1 has OpusTags. Both use the same Vorbis comment format for tags.
 
-// OGG CRC32 lookup table (polynomial 0x04C11DB7)
+/**
+ * Pre-computed CRC32 lookup table for OGG page checksums.
+ * Uses the OGG-specific polynomial 0x04C11DB7 (same as MPEG-2, Ethernet).
+ * @type {Uint32Array}
+ */
 const OGG_CRC_TABLE = new Uint32Array(256);
 (function() {
   for (let i = 0; i < 256; i++) {
@@ -523,6 +690,13 @@ const OGG_CRC_TABLE = new Uint32Array(256);
   }
 })();
 
+/**
+ * Compute OGG CRC32 over a byte array.
+ * The CRC field in the page header must be zeroed before computing.
+ *
+ * @param {Uint8Array} data - Bytes to checksum
+ * @returns {number} CRC32 value (unsigned 32-bit)
+ */
 function oggCrc32(data) {
   let crc = 0;
   for (let i = 0; i < data.length; i++) {
@@ -531,11 +705,22 @@ function oggCrc32(data) {
   return crc;
 }
 
+/**
+ * Parse all OGG pages from a buffer.
+ *
+ * Scans for "OggS" magic bytes and parses each page's header, segment table,
+ * and payload data. Returns an array of page descriptors used by the comment
+ * parser and writer.
+ *
+ * @param {ArrayBuffer} buffer - Raw OGG file bytes
+ * @returns {Array<Object>} Array of page objects with header fields and payload
+ */
 function parseOggPages(buffer) {
   const bytes = new Uint8Array(buffer);
   const pages = [];
   let i = 0;
   while (i + 27 <= bytes.length) {
+    // Scan for "OggS" capture pattern
     if (bytes[i]!==0x4F||bytes[i+1]!==0x67||bytes[i+2]!==0x67||bytes[i+3]!==0x53) { i++; continue; }
     const headerType = bytes[i + 5];
     const granule = new DataView(buffer, i + 6, 8).getBigInt64(0, true);
@@ -544,61 +729,95 @@ function parseOggPages(buffer) {
     const numSeg = bytes[i + 26];
     if (i + 27 + numSeg > bytes.length) break;
     const segTable = bytes.slice(i + 27, i + 27 + numSeg);
+    // Total data size = sum of all segment sizes
     let dataSize = 0;
     for (let s = 0; s < numSeg; s++) dataSize += segTable[s];
-    const headerLen = 27 + numSeg;
+    const headerLen = 27 + numSeg; // fixed header + segment table
     const pageStart = i;
     const dataStart = i + headerLen;
     if (dataStart + dataSize > bytes.length) break;
     const pageData = bytes.slice(dataStart, dataStart + dataSize);
     pages.push({ headerType, granule, serial, pageSeq, segTable, pageData, pageStart, headerLen, dataSize });
-    i = dataStart + dataSize;
+    i = dataStart + dataSize; // advance to next page
   }
   return pages;
 }
 
+/**
+ * Build a single-packet OGG page from scratch, computing the segment table and CRC.
+ *
+ * @param {number} headerType - Page header type flags (0x02=BOS, 0x04=EOS, etc.)
+ * @param {bigint} granule - Granule position for this page
+ * @param {number} serial - Stream serial number
+ * @param {number} pageSeq - Page sequence number
+ * @param {Uint8Array} pageData - The packet payload
+ * @returns {Uint8Array} Complete serialized OGG page with valid CRC
+ */
 function buildOggPage(headerType, granule, serial, pageSeq, pageData) {
-  // Build segment table: split into 255-byte segments
+  // Build segment table: each 255-byte chunk is a "continuing" segment;
+  // the final segment (0-254 bytes) marks the packet boundary
   const segments = [];
   let remaining = pageData.length;
   while (remaining >= 255) { segments.push(255); remaining -= 255; }
-  segments.push(remaining); // final segment (0-254), 0 if exact multiple of 255
+  segments.push(remaining); // value < 255 signals end of packet
   const numSeg = segments.length;
   const headerLen = 27 + numSeg;
   const page = new Uint8Array(headerLen + pageData.length);
   const view = new DataView(page.buffer);
-  // "OggS"
+  // Write "OggS" magic
   page[0]=0x4F; page[1]=0x67; page[2]=0x67; page[3]=0x53;
-  page[4] = 0; // version
+  page[4] = 0; // version (always 0)
   page[5] = headerType;
   view.setBigInt64(6, granule, true);
   view.setUint32(14, serial, true);
   view.setUint32(18, pageSeq, true);
-  // CRC placeholder (bytes 22-25) = 0
+  // CRC field (bytes 22-25) left as 0 for now — computed below
   page[26] = numSeg;
   for (let s = 0; s < numSeg; s++) page[27 + s] = segments[s];
   page.set(pageData, headerLen);
-  // Compute CRC over entire page with CRC field = 0
+  // CRC must be computed with the CRC field itself set to zero
   const crc = oggCrc32(page);
   view.setUint32(22, crc, true);
   return page;
 }
 
-// Extract packet boundaries from an OGG page's segment table
+/**
+ * Extract packet size boundaries from an OGG page's segment table.
+ *
+ * In the segment table, each value 0-255 represents a segment size. A value of
+ * 255 means the packet continues into the next segment. Any value < 255 ends
+ * the current packet. This function returns the cumulative sizes of each
+ * complete packet.
+ *
+ * @param {Uint8Array} segTable - Segment table from a parsed OGG page
+ * @returns {number[]} Array of packet sizes within this page
+ */
 function getPacketBoundaries(segTable) {
   const packets = [];
   let offset = 0;
   for (let i = 0; i < segTable.length; i++) {
     offset += segTable[i];
-    if (segTable[i] < 255) { // End of packet
+    if (segTable[i] < 255) { // packet boundary reached
       packets.push(offset);
       offset = 0;
     }
   }
-  if (offset > 0) packets.push(offset); // Incomplete packet (continues on next page)
+  if (offset > 0) packets.push(offset); // incomplete packet (continues on next page)
   return packets;
 }
 
+/**
+ * Parse Vorbis comments from an OGG Vorbis or Opus file.
+ *
+ * Detects stream type from page 0 magic bytes (\x01vorbis or OpusHead),
+ * then parses the comment packet from page 1. The comment packet uses the
+ * Vorbis comment format: vendor string followed by KEY=value pairs, each
+ * length-prefixed as little-endian uint32.
+ *
+ * @param {ArrayBuffer} buffer - Raw OGG/Opus file bytes
+ * @returns {Object} Parsed comment data including tags, vendor string, pages,
+ *                   stream type, serial number, trailing data, and comment packet size
+ */
 function parseOggComments(buffer) {
   const pages = parseOggPages(buffer);
   if (pages.length < 2) throw new Error('Not enough OGG pages');
@@ -644,6 +863,20 @@ function parseOggComments(buffer) {
   return { tags, vendorString, pages, isOpus, serial: pages[0].serial, trailingData, commentPacketSize };
 }
 
+/**
+ * Build an OGG page containing multiple packets, computing segment table and CRC.
+ *
+ * Unlike buildOggPage() which handles a single packet, this creates proper segment
+ * table entries for each packet (each ending with a segment value < 255) so the
+ * decoder can distinguish packet boundaries within the page.
+ *
+ * @param {number} headerType - Page header type flags
+ * @param {bigint} granule - Granule position for this page
+ * @param {number} serial - Stream serial number
+ * @param {number} pageSeq - Page sequence number
+ * @param {Uint8Array[]} packets - Array of packet payloads to include in this page
+ * @returns {Uint8Array} Complete serialized OGG page with valid CRC
+ */
 function buildOggPageMultiPacket(headerType, granule, serial, pageSeq, packets) {
   // Build segment table for multiple packets
   const segments = [];
@@ -673,6 +906,20 @@ function buildOggPageMultiPacket(headerType, granule, serial, pageSeq, packets) 
   return page;
 }
 
+/**
+ * Write updated Vorbis comments back to an OGG Vorbis or Opus file.
+ *
+ * Rebuilds the comment packet with the appropriate magic prefix (OpusTags or
+ * \x03vorbis), serializes all KEY=value pairs, then reconstructs page 1 with
+ * the new comment data. For Vorbis streams, a framing bit (0x01) is appended.
+ * If page 1 contained trailing data (e.g. Vorbis setup header), it is preserved
+ * as a second packet in the rebuilt page. Page 0 and pages 2+ are copied verbatim.
+ *
+ * @param {ArrayBuffer} buffer - Original OGG file bytes
+ * @param {Array<[string, string]>} tags - Key-value tag pairs to write
+ * @param {Object} meta - Metadata from parseOggComments() (vendor, pages, serial, etc.)
+ * @returns {ArrayBuffer} New OGG file bytes with updated comments
+ */
 function writeOggComments(buffer, tags, meta) {
   const { vendorString, pages, isOpus, serial, trailingData } = meta;
   const enc = new TextEncoder();
@@ -746,6 +993,15 @@ function writeOggComments(buffer, tags, meta) {
 // Format detection by magic bytes
 // ==========
 
+/**
+ * Detect audio format by inspecting the first few bytes of a file.
+ *
+ * Checks magic bytes in order: FLAC ("fLaC"), MP3 (ID3v2 header or MPEG sync word),
+ * M4A (ftyp atom at offset 4), OGG/Opus ("OggS" then codec-specific BOS page magic).
+ *
+ * @param {ArrayBuffer} buffer - Raw file bytes
+ * @returns {string|null} Format identifier ('flac'|'mp3'|'m4a'|'ogg'|'opus') or null
+ */
 function detectFormat(buffer) {
   const b = new Uint8Array(buffer);
   if (b[0]===0x66&&b[1]===0x4C&&b[2]===0x61&&b[3]===0x43) return 'flac';
@@ -769,29 +1025,60 @@ function detectFormat(buffer) {
 // ==========
 // ID3v2
 // ==========
+//
+// ID3v2 is a tag container prepended to MP3 files. The header is 10 bytes:
+//   [0-2]  "ID3" magic
+//   [3]    major version (3 = ID3v2.3, 4 = ID3v2.4)
+//   [4]    revision
+//   [5]    flags
+//   [6-9]  tag size as synchsafe integer (each byte uses only 7 bits)
+//
+// After the header, frames follow contiguously. Each frame has:
+//   [0-3]  4-char ASCII frame ID (e.g. "TIT2", "TPE1")
+//   [4-7]  frame data size (synchsafe in v2.4, regular uint32 in v2.3)
+//   [8-9]  flags (2 bytes)
+//   [10..] frame data
+//
+// Text frames (T***) start with an encoding byte:
+//   0 = Latin-1, 1 = UTF-16 with BOM, 2 = UTF-16BE, 3 = UTF-8
+// USLT (lyrics) and COMM (comments) add a 3-byte language code and a
+// null-terminated content descriptor before the actual text.
 
+/**
+ * Parse ID3v2 tags from an MP3 file buffer.
+ *
+ * Reads the ID3v2 header, then walks frame-by-frame extracting text frames,
+ * TXXX custom frames, USLT lyrics, and COMM comments. Unrecognized frames
+ * are preserved as raw bytes for round-tripping on save.
+ *
+ * @param {ArrayBuffer} buffer - Raw MP3 file bytes
+ * @returns {Object} Parsed result with tags array, rawFrames array, and headerSize
+ */
 function parseId3(buffer) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
 
+  // Check for "ID3" magic at start of file
   if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33)
     return { tags: [], rawFrames: [], headerSize: 0 };
 
-  const majorVer = bytes[3];
+  const majorVer = bytes[3]; // 3 = ID3v2.3, 4 = ID3v2.4
+  // Tag size is stored as a 28-bit synchsafe integer (7 usable bits per byte)
   const tagSize = ((bytes[6] & 0x7F) << 21) | ((bytes[7] & 0x7F) << 14) |
                   ((bytes[8] & 0x7F) << 7)  |  (bytes[9] & 0x7F);
-  const headerSize = 10 + tagSize;
+  const headerSize = 10 + tagSize; // 10-byte header + tag data
 
   const dec8    = new TextDecoder('latin1');
   const dec16   = new TextDecoder('utf-16');
   const dec16be = new TextDecoder('utf-16be');
   const dec8u   = new TextDecoder('utf-8');
 
+  /** Map ID3 encoding byte to the appropriate TextDecoder instance. */
   function getDecoder(enc) {
-    if (enc === 0) return dec8;
-    if (enc === 1) return dec16;
-    if (enc === 2) return dec16be;
-    return dec8u;
+    if (enc === 0) return dec8;      // Latin-1
+    if (enc === 1) return dec16;     // UTF-16 with BOM
+    if (enc === 2) return dec16be;   // UTF-16BE without BOM
+    return dec8u;                    // UTF-8 (encoding byte 3)
   }
 
   const tags = [];
@@ -802,6 +1089,7 @@ function parseId3(buffer) {
     const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
     if (id === '\0\0\0\0' || !/^[A-Z0-9]{4}$/.test(id)) break;
 
+    // ID3v2.4 uses synchsafe integers (7 bits per byte); v2.3 uses regular uint32
     let frameSize;
     if (majorVer >= 4) {
       frameSize = ((bytes[offset+4] & 0x7F) << 21) | ((bytes[offset+5] & 0x7F) << 14) |
@@ -872,6 +1160,22 @@ function parseId3(buffer) {
   return { tags, rawFrames, headerSize };
 }
 
+/**
+ * Write ID3v2.3 tags to an audio buffer.
+ *
+ * Serializes all tag key-value pairs into ID3v2 frames using UTF-8 encoding.
+ * Standard text frames (T***), TXXX custom frames, USLT lyrics, and COMM
+ * comments are each constructed with appropriate headers. Unknown keys are
+ * stored as TXXX frames with the key as the description field.
+ *
+ * The tag block is padded to the next 4KB boundary to allow minor edits
+ * without rewriting the entire file (standard ID3 practice).
+ *
+ * @param {ArrayBuffer} audioBuffer - Raw audio data (everything after original ID3 header)
+ * @param {Array<[string, string]>} tags - Key-value tag pairs to write
+ * @param {Array<Object>} rawFrames - Preserved binary frames from parsing (APIC, etc.)
+ * @returns {ArrayBuffer} Complete MP3 file with new ID3v2 header prepended
+ */
 function writeId3(audioBuffer, tags, rawFrames) {
   const enc = new TextEncoder();
   const frames = [];
@@ -925,44 +1229,51 @@ function writeId3(audioBuffer, tags, rawFrames) {
     }
   }
 
+  // Append any preserved binary frames (APIC album art, etc.)
   for (const rf of rawFrames) frames.push(rf);
 
+  // Calculate total frame data size (each frame = 10-byte header + data)
   let contentSize = 0;
   for (const f of frames) contentSize += 10 + f.data.length;
-  // Pad to next 4KB boundary
+  // Pad to next 4KB boundary — allows minor tag edits without rewriting the file
   const padded = Math.ceil((contentSize + 10) / 4096) * 4096;
 
+  // Allocate: 10-byte ID3 header + padded tag space + raw audio
   const out = new Uint8Array(10 + padded + audioBuffer.byteLength);
   const outView = new DataView(out.buffer);
 
-  out[0] = 0x49; out[1] = 0x44; out[2] = 0x33; // ID3
-  out[3] = 0x03; out[4] = 0x00; out[5] = 0x00;  // v2.3, no flags
+  // Write ID3v2.3 header
+  out[0] = 0x49; out[1] = 0x44; out[2] = 0x33; // "ID3" magic
+  out[3] = 0x03; out[4] = 0x00; out[5] = 0x00;  // version 2.3.0, no flags
+  // Encode tag size as synchsafe integer (7 bits per byte, MSB always 0)
   out[6] = (padded >> 21) & 0x7F;
   out[7] = (padded >> 14) & 0x7F;
   out[8] = (padded >>  7) & 0x7F;
   out[9] =  padded        & 0x7F;
 
+  // Serialize each frame: 4-char ID + uint32 size + 2 flag bytes + data
   let pos = 10;
   for (const f of frames) {
-    for (let i = 0; i < 4; i++) out[pos + i] = f.id.charCodeAt(i);
-    outView.setUint32(pos + 4, f.data.length, false);
-    out[pos + 8] = 0; out[pos + 9] = 0;
+    for (let i = 0; i < 4; i++) out[pos + i] = f.id.charCodeAt(i); // frame ID
+    outView.setUint32(pos + 4, f.data.length, false);               // frame size (big-endian)
+    out[pos + 8] = 0; out[pos + 9] = 0;                             // no frame flags
     pos += 10;
     out.set(f.data, pos);
     pos += f.data.length;
   }
 
-  // padding already zero
+  // Remaining bytes up to padded size are already zero (Uint8Array default) — valid ID3 padding
   pos = 10 + padded;
-  out.set(new Uint8Array(audioBuffer), pos);
+  out.set(new Uint8Array(audioBuffer), pos); // append raw audio after tag block
 
   return out.buffer;
 }
 
 // ======
-// UI
+// UI — drop zone, tag table, filename template, modal editor, save/download
 // ======
 
+/** @type {HTMLElement} Drop target area for dragging audio files */
 const dropZone  = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const tagSection = document.getElementById('tag-section');
@@ -975,6 +1286,14 @@ dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-ove
 dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); loadFile(e.dataTransfer.files[0]); });
 fileInput.addEventListener('change', e => loadFile(e.target.files[0]));
 
+/**
+ * Load an audio file, detect its format, parse tags, and display them.
+ *
+ * Reads the file into an ArrayBuffer via FileReader, runs format detection,
+ * calls the appropriate parser, and populates the tag editor UI.
+ *
+ * @param {File} file - File object from drop or file input
+ */
 function loadFile(file) {
   if (!file) return;
   currentFile = file;
@@ -1016,6 +1335,21 @@ function loadFile(file) {
   reader.readAsArrayBuffer(file);
 }
 
+/**
+ * Extract audio stream properties (sample rate, channels, bitrate, duration)
+ * by reading codec-specific headers from the file buffer.
+ *
+ * Each format stores this info differently:
+ * - FLAC: STREAMINFO block (type 0) with bit-packed fields
+ * - MP3: First MPEG audio frame header after ID3 tag
+ * - OGG Vorbis: Identification header in page 0
+ * - Opus: OpusHead in page 0, granule from last page (always 48kHz base)
+ * - M4A: mvhd atom for duration, mp4a/alac sample entry for channels/rate
+ *
+ * @param {ArrayBuffer} buffer - Raw file bytes
+ * @param {string} format - Format identifier ('flac'|'mp3'|'ogg'|'opus'|'m4a')
+ * @returns {Object} Audio info with sampleRate, channels, bitDepth, bitrate, duration
+ */
 function parseAudioInfo(buffer, format) {
   const bytes = new Uint8Array(buffer);
   const view = new DataView(buffer);
@@ -1183,12 +1517,22 @@ function parseAudioInfo(buffer, format) {
   return info;
 }
 
+/**
+ * Format a duration in seconds as "m:ss".
+ * @param {number} secs - Duration in seconds
+ * @returns {string} Formatted string or "—" if falsy
+ */
 function fmtDuration(secs) {
   if (!secs) return '—';
   const m = Math.floor(secs / 60), s = Math.floor(secs % 60);
   return m + ':' + String(s).padStart(2, '0');
 }
 
+/**
+ * Render audio stream info (duration, sample rate, bit depth, bitrate, channels)
+ * into the audio-info panel below the file name.
+ * @param {Object} info - Audio properties from parseAudioInfo()
+ */
 function showAudioInfo(info) {
   const el = document.getElementById('audio-info');
   const stats = [
@@ -1203,6 +1547,13 @@ function showAudioInfo(info) {
   ).join('');
 }
 
+/**
+ * Populate the tag editor table with parsed tags, show file info, and
+ * initialize the filename template section.
+ *
+ * @param {Array<[string, string]>} tags - Parsed key-value tag pairs
+ * @param {string} format - Display label for the format badge (e.g. "FLAC", "MP3")
+ */
 function showTags(tags, format) {
   const badge = `<span class="format-badge ${format.toLowerCase()}">${format}</span>`;
   const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(2);
@@ -1219,6 +1570,16 @@ function showTags(tags, format) {
   setStatus(tags.length + ' tags');
 }
 
+/**
+ * Add a tag row to the editor table.
+ *
+ * For MP3 files, translates raw ID3 frame IDs (e.g. TIT2) to human-readable
+ * names (e.g. Title) for display. Multiline values are collapsed to single-line
+ * in the input but preserved in dataset.raw for round-tripping.
+ *
+ * @param {string} key - Tag key / frame ID (empty string for new blank row)
+ * @param {string} value - Tag value (may contain newlines)
+ */
 function addRow(key = '', value = '') {
   const tr = document.createElement('tr');
   // For MP3, translate frame IDs to friendly names for display
@@ -1249,6 +1610,14 @@ function addRow(key = '', value = '') {
   if (!key) tr.querySelector('input').focus();
 }
 
+/**
+ * Collect all tag key-value pairs from the editor table rows.
+ *
+ * For MP3, translates display names back to real frame IDs. Uses the raw
+ * dataset value (which preserves newlines) rather than the collapsed input value.
+ *
+ * @returns {Array<[string, string]>} Tag pairs, filtered to exclude empty keys
+ */
 function getTags() {
   return Array.from(tagBody.querySelectorAll('tr')).map(tr => {
     const ins = tr.querySelectorAll('input');
@@ -1264,6 +1633,13 @@ function getTags() {
   }).filter(([k]) => k);
 }
 
+/**
+ * Save the edited tags back to the audio file and trigger a browser download.
+ *
+ * Calls the appropriate format-specific writer, creates a Blob URL, and clicks
+ * a temporary anchor element to initiate the download. The filename is generated
+ * from the filename template with tag variable substitution.
+ */
 function saveFile() {
   try {
     const tags = getTags();
@@ -1298,6 +1674,11 @@ function saveFile() {
   }
 }
 
+/**
+ * Filename template variables and their corresponding tag keys per format.
+ * Used by resolveFilename() to substitute %title%, %artist%, etc.
+ * @type {Array<[string, Object<string, string>]>}
+ */
 const VAR_FIELDS = [
   ['%title%',       { flac: 'TITLE',       mp3: 'TIT2', m4a: 'TITLE',       ogg: 'TITLE',       opus: 'TITLE'       }],
   ['%artist%',      { flac: 'ARTIST',      mp3: 'TPE1', m4a: 'ARTIST',      ogg: 'ARTIST',      opus: 'ARTIST'      }],
@@ -1311,6 +1692,13 @@ const VAR_FIELDS = [
 
 let currentExt = '';
 
+/**
+ * Initialize the filename template UI with the original filename and variable chips.
+ * Splits filename into base name and extension, then creates clickable variable
+ * chips (%title%, %artist%, etc.) for insertion into the template.
+ *
+ * @param {string} filename - Original filename of the loaded file
+ */
 function setupFilenameSection(filename) {
   const dotIdx = filename.lastIndexOf('.');
   currentExt = dotIdx >= 0 ? filename.slice(dotIdx) : '';
@@ -1328,6 +1716,11 @@ function setupFilenameSection(filename) {
   }
 }
 
+/**
+ * Insert a template variable (e.g. %title%) at the cursor position in the
+ * filename input field.
+ * @param {string} v - Variable placeholder to insert
+ */
 function insertVar(v) {
   const inp = document.getElementById('filename-input');
   const s = inp.selectionStart, e = inp.selectionEnd;
@@ -1337,16 +1730,27 @@ function insertVar(v) {
   updateFilenamePreview();
 }
 
+/** Update the filename preview by resolving the template with current tag values. */
 function updateFilenamePreview() {
   const el = document.getElementById('filename-preview');
   if (!currentFile) { el.textContent = ''; return; }
   el.innerHTML = '→ ' + escHtml(resolveFilename());
 }
 
+/**
+ * Escape HTML special characters for safe insertion into innerHTML.
+ * @param {string} s - Raw string
+ * @returns {string} HTML-escaped string
+ */
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+/**
+ * Resolve the filename template by substituting %var% placeholders with
+ * actual tag values. Unsafe filename characters are replaced with underscores.
+ * @returns {string} Resolved filename with extension
+ */
 function resolveFilename() {
   let name = document.getElementById('filename-input').value.trim() || 'output';
   const tags = getTags();
@@ -1360,6 +1764,11 @@ function resolveFilename() {
   return name + currentExt;
 }
 
+/**
+ * Common tag fields per format, used to populate the "add field" dropdown.
+ * Each entry is [tagKey, displayLabel]. An empty key means "Custom..." (free-form).
+ * @type {Object<string, Array<[string, string]>>}
+ */
 const COMMON_FIELDS = {
   flac: [
     ['TITLE',       'Title'],
@@ -1441,6 +1850,11 @@ const COMMON_FIELDS = {
   ]
 };
 
+/**
+ * Get the set of tag keys currently present in the editor table.
+ * For MP3, display names are normalized back to frame IDs for dedup.
+ * @returns {Set<string>} Uppercase tag keys in use
+ */
 function getUsedKeys() {
   return new Set(
     Array.from(tagBody.querySelectorAll('tr')).map(tr => {
@@ -1452,6 +1866,9 @@ function getUsedKeys() {
   );
 }
 
+/**
+ * Rebuild the "add field" dropdown, excluding fields already present in the table.
+ */
 function updateFieldPicker() {
   const sel = document.getElementById('field-picker');
   const fields = COMMON_FIELDS[currentFormat] || [];
@@ -1467,6 +1884,10 @@ function updateFieldPicker() {
   }
 }
 
+/**
+ * Handle selection from the "add field" dropdown — adds a new row and refreshes the picker.
+ * @param {HTMLSelectElement} sel - The field picker select element
+ */
 function pickField(sel) {
   const val = sel.value;
   sel.value = '';
@@ -1474,8 +1895,15 @@ function pickField(sel) {
   updateFieldPicker();
 }
 
+/** @type {HTMLInputElement|null} Reference to the input being edited in the modal */
 let _modalInput = null;
 
+/**
+ * Open the full-text modal editor for a tag value.
+ * Reads the raw (multiline-preserved) value from the row's input and displays
+ * it in a textarea for comfortable editing of long values like lyrics.
+ * @param {HTMLButtonElement} btn - The expand button that was clicked
+ */
 function openModal(btn) {
   const row = btn.closest('tr');
   const ins = row.querySelectorAll('input[type=text]');
@@ -1489,6 +1917,11 @@ function openModal(btn) {
   document.getElementById('modal-ta').focus();
 }
 
+/**
+ * Close the full-text modal editor. If saving, writes the textarea content
+ * back to the row's raw data attribute and updates the collapsed display.
+ * @param {boolean} save - Whether to apply changes (true) or discard (false)
+ */
 function closeModal(save) {
   if (save && _modalInput) {
     const newVal = document.getElementById('modal-ta').value;
@@ -1505,16 +1938,27 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') closeModal(false);
 });
 
+/**
+ * Display a status message in the status bar.
+ * @param {string} msg - Message text
+ * @param {boolean} isErr - If true, style as an error
+ */
 function setStatus(msg, isErr = false) {
   statusEl.textContent = msg;
   statusEl.className = isErr ? 'err' : '';
 }
 
+/**
+ * Escape a string for safe use in HTML attribute values.
+ * @param {string} s - Raw string
+ * @returns {string} Escaped string (ampersands, quotes, angle brackets)
+ */
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
 
-// Prevent pinch-to-zoom on iOS Safari (ignores user-scalable=no since iOS 10)
+// Mobile zoom prevention — iOS Safari ignores user-scalable=no since iOS 10,
+// so we manually intercept multi-touch (pinch) and rapid double-tap gestures.
 document.addEventListener('touchmove', function(e) {
   if (e.touches.length > 1) e.preventDefault();
 }, { passive: false });
@@ -1527,6 +1971,8 @@ document.addEventListener('touchend', function(e) {
 }, { passive: false });
 </script>
 <script>
+// PWA service worker registration — enables offline use and install-to-homescreen.
+// On update: immediately activate the new SW and reload for a seamless upgrade.
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').then(reg => {
     // If a new SW is waiting, activate it immediately and reload
