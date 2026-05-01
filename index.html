@@ -1,0 +1,1493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Tag Editor</title>
+<meta name="description" content="Edit metadata in any audio format directly in your browser. No upload, no server — all local.">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="shortcut icon" href="favicon.ico">
+<meta property="og:title" content="Tag Editor">
+<meta property="og:description" content="Edit metadata in any audio format directly in your browser. No upload, no server — all local.">
+<meta property="og:image" content="https://wendy.monster/tag-editor/og.png?v=3">
+<meta property="og:url" content="https://wendy.monster/tag-editor/">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Tag Editor">
+<meta name="twitter:description" content="Edit metadata in any audio format directly in your browser. No upload, no server — all local.">
+<meta name="twitter:image" content="https://wendy.monster/tag-editor/og.png?v=3">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Tag Editor">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="apple-touch-icon-precomposed" href="apple-touch-icon.png">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { touch-action: pan-x pan-y; }
+  body { background: #111; color: #eee; font-family: monospace; font-size: 14px; padding: 24px; }
+  h1 { font-size: 16px; margin-bottom: 20px; color: #777; letter-spacing: 2px; text-transform: uppercase; }
+  #drop-zone {
+    border: 2px dashed #2a2a2a;
+    border-radius: 6px;
+    padding: 48px;
+    text-align: center;
+    cursor: pointer;
+    color: #444;
+    transition: all 0.15s;
+    margin-bottom: 24px;
+    user-select: none;
+  }
+  #drop-zone.loaded { padding: 10px 16px; font-size: 11px; color: #2a2a2a; }
+  #drop-zone.drag-over { border-color: #4a8fd4; color: #4a8fd4; background: #0d1a2a; }
+  #drop-zone:hover { border-color: #333; color: #555; }
+  #file-info { margin-bottom: 14px; color: #666; font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
+  #file-info strong { color: #bbb; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #file-info .file-size { white-space: nowrap; flex-shrink: 0; }
+  #audio-info { margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #444; justify-content: center; }
+  .ai-stat { display: flex; flex-direction: column; gap: 1px; }
+  .ai-stat span:first-child { color: #2a2a2a; text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; }
+  .ai-stat span:last-child { color: #666; }
+  .format-badge {
+    padding: 2px 7px; border-radius: 3px; font-size: 10px; letter-spacing: 1px;
+    background: #1a3a1a; color: #4a9; text-transform: uppercase;
+  }
+  .format-badge.mp3 { background: #3a1a1a; color: #d77; }
+  .format-badge.m4a { background: #1a1a3a; color: #88b; }
+  .format-badge.ogg { background: #2a1a2a; color: #b8b; }
+  .format-badge.opus { background: #1a2a2a; color: #8bb; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
+  thead th { text-align: left; padding: 6px 8px; color: #444; font-weight: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid #1d1d1d; }
+  tbody tr { border-bottom: 1px solid #161616; }
+  tbody tr:hover { background: #141414; }
+  td { padding: 3px 6px; }
+  input[type=text] {
+    background: transparent; border: none; color: #ddd; padding: 5px 6px;
+    font-family: monospace; font-size: 13px; width: 100%; outline: none;
+    border-radius: 3px; transition: background 0.1s;
+  }
+  input[type=text]:focus { background: #1a1a1a; }
+  .key-col { width: 120px; }
+  .key-col input { color: #888; text-transform: uppercase; }
+  .key-col input:focus { color: #bbb; }
+  .del-btn { background: none; border: none; color: #2a2a2a; cursor: pointer; font-size: 15px; padding: 2px 4px; transition: color 0.1s; }
+  .del-btn:hover { color: #c44; }
+  .exp-btn { background: none; border: none; color: #333; cursor: pointer; font-size: 14px; padding: 2px 4px; transition: color 0.1s; }
+  .exp-btn:hover { color: #888; }
+  .act-col { width: 52px; white-space: nowrap; }
+  #modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    z-index: 100; align-items: center; justify-content: center;
+  }
+  #modal-overlay.open { display: flex; }
+  #modal {
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 6px;
+    padding: 20px; width: min(600px, 92vw); display: flex; flex-direction: column; gap: 12px;
+  }
+  #modal-key { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1px; }
+  #modal-ta {
+    background: #111; border: 1px solid #2a2a2a; color: #ddd; padding: 10px;
+    font-family: monospace; font-size: 13px; border-radius: 4px; resize: vertical;
+    min-height: 200px; outline: none; width: 100%;
+  }
+  #modal-ta:focus { border-color: #4a8fd4; }
+  #modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  #controls { display: flex; align-items: center; gap: 10px; padding: 4px 0 24px; }
+  #status { margin-left: auto; }
+  #save-row { display: flex; justify-content: center; padding-top: 8px; }
+  .btn {
+    background: #171717; border: 1px solid #2a2a2a; color: #888;
+    padding: 7px 14px; cursor: pointer; font-family: monospace; font-size: 12px;
+    border-radius: 4px; transition: all 0.1s;
+  }
+  .btn:hover { background: #1e1e1e; border-color: #3a3a3a; color: #bbb; }
+  .btn-save { border-color: #2a4a6a; color: #4a8fd4; }
+  .btn-save:hover { background: #0d1a2a; border-color: #4a8fd4; color: #6aaff4; }
+  #status { font-size: 12px; color: #4a9; margin-left: 4px; }
+  #status.err { color: #c55; }
+  #file-input { display: none; }
+  #tag-section { display: none; }
+  #filename-section { margin-bottom: 16px; }
+  #filename-row { display: flex; align-items: center; margin-bottom: 6px; }
+  #filename-input {
+    flex: 1; background: #151515; border: 1px solid #2a2a2a; color: #ccc;
+    padding: 7px 10px; font-family: monospace; font-size: 13px;
+    border-radius: 4px 0 0 4px; outline: none;
+  }
+  #filename-input:focus { border-color: #4a8fd4; }
+  #filename-ext {
+    background: #1a1a1a; border: 1px solid #2a2a2a; border-left: none; color: #555;
+    padding: 7px 10px; font-family: monospace; font-size: 13px;
+    border-radius: 0 4px 4px 0; white-space: nowrap; user-select: none;
+  }
+  #filename-preview { font-size: 12px; color: #555; margin-bottom: 6px; font-style: italic; min-height: 16px; }
+  #filename-preview span { color: #4a8fd4; font-style: normal; }
+  #filename-vars { display: flex; flex-wrap: wrap; gap: 5px; }
+  .var-chip {
+    background: #181818; border: 1px solid #2a2a2a; color: #666;
+    padding: 2px 8px; border-radius: 3px; font-size: 11px; cursor: pointer;
+    font-family: monospace; transition: all 0.1s;
+  }
+  .var-chip:hover { border-color: #4a8fd4; color: #4a8fd4; background: #0d1a2a; }
+</style>
+</head>
+<body>
+<h1>tag editor</h1>
+
+<div id="modal-overlay" onclick="closeModal(false)">
+  <div id="modal" onclick="event.stopPropagation()">
+    <div id="modal-key"></div>
+    <textarea id="modal-ta" spellcheck="false"></textarea>
+    <div id="modal-btns">
+      <button class="btn" onclick="closeModal(false)">cancel</button>
+      <button class="btn btn-save" onclick="closeModal(true)">ok</button>
+    </div>
+  </div>
+</div>
+
+<div id="drop-zone" onclick="document.getElementById('file-input').click()">
+  drop audio file here, or click to browse
+</div>
+<input type="file" id="file-input" accept=".mp3,.flac,.m4a,.ogg,.opus,audio/mpeg,audio/flac,audio/mp4,audio/x-m4a,audio/ogg,audio/opus">
+
+<div id="tag-section">
+  <div id="file-info"></div>
+  <div id="audio-info"></div>
+  <table>
+    <thead>
+      <tr>
+        <th class="key-col">key</th>
+        <th>value</th>
+        <th class="act-col"></th>
+      </tr>
+    </thead>
+    <tbody id="tag-body"></tbody>
+  </table>
+  <div id="controls">
+    <select id="field-picker" class="btn" onchange="pickField(this)">
+      <option value="">+ field</option>
+    </select>
+    <span id="status"></span>
+  </div>
+  <div id="filename-section">
+    <div id="filename-row">
+      <input type="text" id="filename-input" spellcheck="false" placeholder="filename" oninput="updateFilenamePreview()">
+      <span id="filename-ext"></span>
+    </div>
+    <div id="filename-preview"></div>
+    <div id="filename-vars"></div>
+  </div>
+  <div id="save-row">
+    <button class="btn btn-save" onclick="saveFile()">save &amp; download</button>
+  </div>
+</div>
+
+<script>
+let currentFile = null;
+let currentBuffer = null;
+let currentFormat = null;
+let parsedMeta = null;
+
+// =====================
+// FLAC Vorbis Comments
+// =====================
+
+function parseFlac(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+
+  if (bytes[0] !== 0x66 || bytes[1] !== 0x4C || bytes[2] !== 0x61 || bytes[3] !== 0x43)
+    throw new Error('Not a FLAC file');
+
+  let offset = 4;
+  while (offset + 4 <= buffer.byteLength) {
+    const blockHeader = bytes[offset];
+    const isLast = !!(blockHeader & 0x80);
+    const blockType = blockHeader & 0x7F;
+    const blockLength = (bytes[offset+1] << 16) | (bytes[offset+2] << 8) | bytes[offset+3];
+    const dataOff = offset + 4;
+
+    if (blockType === 4) { // VORBIS_COMMENT
+      const dec = new TextDecoder('utf-8');
+      let pos = dataOff;
+      const vendorLen = view.getUint32(pos, true); pos += 4;
+      const vendorString = dec.decode(new Uint8Array(buffer, pos, vendorLen)); pos += vendorLen;
+      const count = view.getUint32(pos, true); pos += 4;
+      const tags = [];
+      for (let i = 0; i < count; i++) {
+        const clen = view.getUint32(pos, true); pos += 4;
+        const comment = dec.decode(new Uint8Array(buffer, pos, clen)); pos += clen;
+        const eq = comment.indexOf('=');
+        if (eq > 0) tags.push([comment.slice(0, eq).toUpperCase(), comment.slice(eq + 1)]);
+      }
+      return { tags, vendorString, blockOffset: offset, blockLength, isLast };
+    }
+
+    offset += 4 + blockLength;
+    if (isLast) break;
+  }
+  // No Vorbis Comment block found — return empty meta so we can create one
+  return { tags: [], vendorString: 'Wendy Tag Editor', blockOffset: -1, blockLength: 0, isLast: false };
+}
+
+function writeFlac(buffer, tags, meta) {
+  const enc = new TextEncoder();
+  const { vendorString, blockOffset, blockLength, isLast } = meta;
+
+  const vendorBytes = enc.encode(vendorString);
+  const encoded = tags.filter(([k]) => k.trim()).map(([k, v]) => enc.encode(k.toUpperCase() + '=' + v));
+
+  let newDataSize = 4 + vendorBytes.length + 4;
+  for (const c of encoded) newDataSize += 4 + c.length;
+
+  if (blockOffset === -1) {
+    // No existing Vorbis Comment block — insert one after STREAMINFO (first block)
+    const bytes = new Uint8Array(buffer);
+    let insertPos = 4; // right after "fLaC"
+    // Skip STREAMINFO block
+    const siLen = (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
+    const siWasLast = !!(bytes[4] & 0x80);
+    insertPos += 4 + siLen;
+    // Clear "last block" flag on STREAMINFO if it was set
+    const newTotal = 4 + newDataSize;
+    const out = new Uint8Array(buffer.byteLength + newTotal);
+    const outView = new DataView(out.buffer);
+    out.set(new Uint8Array(buffer, 0, insertPos));
+    if (siWasLast) out[4] = out[4] & 0x7F; // clear last-block on STREAMINFO
+    // Write new Vorbis Comment block (mark as last if STREAMINFO was last)
+    out[insertPos] = (siWasLast ? 0x80 : 0x00) | 4;
+    out[insertPos + 1] = (newDataSize >> 16) & 0xFF;
+    out[insertPos + 2] = (newDataSize >> 8) & 0xFF;
+    out[insertPos + 3] = newDataSize & 0xFF;
+    let pos = insertPos + 4;
+    outView.setUint32(pos, vendorBytes.length, true); pos += 4;
+    out.set(vendorBytes, pos); pos += vendorBytes.length;
+    outView.setUint32(pos, encoded.length, true); pos += 4;
+    for (const c of encoded) {
+      outView.setUint32(pos, c.length, true); pos += 4;
+      out.set(c, pos); pos += c.length;
+    }
+    out.set(new Uint8Array(buffer, insertPos), pos);
+    return out.buffer;
+  }
+
+  const oldTotal = 4 + blockLength;
+  const newTotal = 4 + newDataSize;
+  const out = new Uint8Array(buffer.byteLength - oldTotal + newTotal);
+  const outView = new DataView(out.buffer);
+
+  out.set(new Uint8Array(buffer, 0, blockOffset));
+
+  out[blockOffset] = (isLast ? 0x80 : 0x00) | 4;
+  out[blockOffset + 1] = (newDataSize >> 16) & 0xFF;
+  out[blockOffset + 2] = (newDataSize >> 8) & 0xFF;
+  out[blockOffset + 3] = newDataSize & 0xFF;
+
+  let pos = blockOffset + 4;
+  outView.setUint32(pos, vendorBytes.length, true); pos += 4;
+  out.set(vendorBytes, pos); pos += vendorBytes.length;
+  outView.setUint32(pos, encoded.length, true); pos += 4;
+  for (const c of encoded) {
+    outView.setUint32(pos, c.length, true); pos += 4;
+    out.set(c, pos); pos += c.length;
+  }
+
+  out.set(new Uint8Array(buffer, blockOffset + oldTotal), pos);
+  return out.buffer;
+}
+
+// ==========
+// ID3 frame ID ↔ friendly display name
+// ==========
+const ID3_DISPLAY = {
+  TIT2: 'TITLE',        TALB: 'ALBUM',        TPE1: 'ARTIST',
+  TPE2: 'ALBUMARTIST',  TRCK: 'TRACKNUMBER',  TPOS: 'DISCNUMBER',
+  TDRC: 'DATE',         TYER: 'YEAR',         TCON: 'GENRE',
+  TCOM: 'COMPOSER',     TBPM: 'BPM',          TKEY: 'INITIALKEY',
+  TLEN: 'LENGTH',       TENC: 'ENCODEDBY',    TCOP: 'COPYRIGHT',
+  TPE3: 'CONDUCTOR',    TPUB: 'PUBLISHER',    TSSE: 'ENCODERSETTINGS',
+  TSRC: 'ISRC',         TLAN: 'LANGUAGE',
+  USLT: 'LYRICS',       TIT1: 'GROUPING',     TIT3: 'SUBTITLE',
+  TPE4: 'REMIXER',      TMOO: 'MOOD',         TMED: 'MEDIATYPE',
+};
+const ID3_FROM_DISPLAY = Object.fromEntries(Object.entries(ID3_DISPLAY).map(([k,v])=>[v,k]));
+
+// ==========
+// M4A / iTunes atoms
+// ==========
+
+const M4A_ATOM_MAP = {
+  '\u00a9nam': 'TITLE',      // ©nam
+  '\u00a9ART': 'ARTIST',     // ©ART
+  '\u00a9alb': 'ALBUM',      // ©alb
+  'aART':      'ALBUMARTIST',
+  '\u00a9day': 'DATE',       // ©day
+  '\u00a9gen': 'GENRE',      // ©gen
+  '\u00a9wrt': 'COMPOSER',   // ©wrt
+  '\u00a9cmt': 'COMMENT',    // ©cmt
+  '\u00a9lyr': 'LYRICS',     // ©lyr
+  'cprt':      'COPYRIGHT',
+  'trkn':      'TRACKNUMBER',
+  'disk':      'DISCNUMBER',
+  'tmpo':      'BPM',
+};
+const M4A_REVERSE_MAP = Object.fromEntries(Object.entries(M4A_ATOM_MAP).map(([k,v])=>[v,k]));
+
+function parseM4a(buffer) {
+  const view = new DataView(buffer);
+  const dec = new TextDecoder('latin1');
+
+  function atomAt(offset) {
+    if (offset + 8 > buffer.byteLength) return null;
+    const size = view.getUint32(offset, false);
+    const type = dec.decode(new Uint8Array(buffer, offset+4, 4));
+    if (size < 8) return null;
+    return { type, start: offset, size, data: offset+8 };
+  }
+
+  function findIn(start, end, name) {
+    let off = start;
+    while (off + 8 <= end) {
+      const a = atomAt(off);
+      if (!a) break;
+      if (a.type === name) return a;
+      off += a.size;
+    }
+    return null;
+  }
+
+  const moov = findIn(0, buffer.byteLength, 'moov');
+  if (!moov) return { tags: [], ilstInfo: null };
+  const udta = findIn(moov.data, moov.start+moov.size, 'udta');
+  if (!udta) return { tags: [], ilstInfo: null };
+  const meta = findIn(udta.data, udta.start+udta.size, 'meta');
+  if (!meta) return { tags: [], ilstInfo: null };
+  const metaData = meta.data + 4; // full box: skip version/flags
+  const ilst = findIn(metaData, meta.start+meta.size, 'ilst');
+  if (!ilst) return { tags: [], ilstInfo: { moov, udta, meta, metaData, ilst: null } };
+
+  const tags = [];
+  let off = ilst.data;
+  while (off + 8 <= ilst.start + ilst.size) {
+    const child = atomAt(off);
+    if (!child) break;
+    const friendly = M4A_ATOM_MAP[child.type];
+    if (friendly) {
+      const data = findIn(child.data, child.start+child.size, 'data');
+      if (data && data.size >= 16) {
+        const ti = view.getUint32(data.data, false);
+        const cStart = data.data + 8;
+        const cLen = (data.start + data.size) - cStart;
+        let val = '';
+        if (ti === 1) {
+          val = new TextDecoder('utf-8').decode(new Uint8Array(buffer, cStart, cLen));
+        } else if (ti === 0x15 && cLen >= 6) {
+          const num = view.getUint16(cStart+2, false);
+          const tot = view.getUint16(cStart+4, false);
+          val = tot > 0 ? `${num}/${tot}` : `${num}`;
+        } else if (ti === 0x15 && cLen === 2) {
+          val = String(view.getUint16(cStart, false));
+        }
+        if (val) tags.push([friendly, val]);
+      }
+    }
+    off += child.size;
+  }
+
+  return { tags, ilstInfo: { moov, udta, meta, metaData, ilst } };
+}
+
+function writeM4a(buffer, tags, ilstInfo) {
+  if (!ilstInfo || !ilstInfo.ilst) throw new Error('No ilst atom found in M4A');
+  const { moov, udta, meta, ilst } = ilstInfo;
+  const enc = new TextEncoder();
+
+  function encLatin1(s) {
+    const out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xFF;
+    return out;
+  }
+
+  const atoms = [];
+  for (const [key, value] of tags) {
+    const atomType = M4A_REVERSE_MAP[key.toUpperCase().trim()];
+    if (!atomType) continue;
+
+    let content, ti;
+    if (atomType === 'trkn' || atomType === 'disk') {
+      const parts = value.split('/');
+      const num = parseInt(parts[0]) || 0, tot = parseInt(parts[1]) || 0;
+      content = new Uint8Array(8);
+      const dv = new DataView(content.buffer);
+      dv.setUint16(2, num, false); dv.setUint16(4, tot, false);
+      ti = 21;
+    } else if (atomType === 'tmpo') {
+      content = new Uint8Array(2);
+      new DataView(content.buffer).setUint16(0, parseInt(value)||0, false);
+      ti = 0x15;
+    } else {
+      content = enc.encode(value); ti = 1;
+    }
+
+    const typeBytes = encLatin1(atomType);
+    const dataAtomSize = 8 + 4 + 4 + content.length;
+    const childSize = 8 + dataAtomSize;
+    const child = new Uint8Array(childSize);
+    const cv = new DataView(child.buffer);
+    cv.setUint32(0, childSize, false);
+    child.set(typeBytes, 4);
+    cv.setUint32(8, dataAtomSize, false);
+    child.set(enc.encode('data'), 12);
+    cv.setUint32(16, ti, false); // type indicator
+    // locale already 0
+    child.set(content, 24);
+    atoms.push(child);
+  }
+
+  const newIlstContent = atoms.reduce((sum, a) => sum + a.length, 0);
+  const newIlstSize = 8 + newIlstContent;
+  const diff = newIlstSize - ilst.size;
+
+  const out = new Uint8Array(buffer.byteLength + diff);
+  const ov = new DataView(out.buffer);
+
+  out.set(new Uint8Array(buffer, 0, ilst.start));
+  let pos = ilst.start;
+  ov.setUint32(pos, newIlstSize, false);
+  out.set(new TextEncoder().encode('ilst'), pos+4);
+  pos += 8;
+  for (const a of atoms) { out.set(a, pos); pos += a.length; }
+  out.set(new Uint8Array(buffer, ilst.start + ilst.size), pos);
+
+  // Patch parent sizes
+  ov.setUint32(moov.start, moov.size + diff, false);
+  ov.setUint32(udta.start, udta.size + diff, false);
+  ov.setUint32(meta.start, meta.size + diff, false);
+
+  return out.buffer;
+}
+
+// =====================
+// OGG Vorbis / Opus
+// =====================
+
+// OGG CRC32 lookup table (polynomial 0x04C11DB7)
+const OGG_CRC_TABLE = new Uint32Array(256);
+(function() {
+  for (let i = 0; i < 256; i++) {
+    let r = i << 24;
+    for (let j = 0; j < 8; j++) r = (r & 0x80000000) ? ((r << 1) ^ 0x04C11DB7) : (r << 1);
+    OGG_CRC_TABLE[i] = r >>> 0;
+  }
+})();
+
+function oggCrc32(data) {
+  let crc = 0;
+  for (let i = 0; i < data.length; i++) {
+    crc = ((crc << 8) ^ OGG_CRC_TABLE[((crc >>> 24) ^ data[i]) & 0xFF]) >>> 0;
+  }
+  return crc;
+}
+
+function parseOggPages(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const pages = [];
+  let i = 0;
+  while (i + 27 <= bytes.length) {
+    if (bytes[i]!==0x4F||bytes[i+1]!==0x67||bytes[i+2]!==0x67||bytes[i+3]!==0x53) { i++; continue; }
+    const headerType = bytes[i + 5];
+    const granule = new DataView(buffer, i + 6, 8).getBigInt64(0, true);
+    const serial = new DataView(buffer, i + 14, 4).getUint32(0, true);
+    const pageSeq = new DataView(buffer, i + 18, 4).getUint32(0, true);
+    const numSeg = bytes[i + 26];
+    if (i + 27 + numSeg > bytes.length) break;
+    const segTable = bytes.slice(i + 27, i + 27 + numSeg);
+    let dataSize = 0;
+    for (let s = 0; s < numSeg; s++) dataSize += segTable[s];
+    const headerLen = 27 + numSeg;
+    const pageStart = i;
+    const dataStart = i + headerLen;
+    if (dataStart + dataSize > bytes.length) break;
+    const pageData = bytes.slice(dataStart, dataStart + dataSize);
+    pages.push({ headerType, granule, serial, pageSeq, segTable, pageData, pageStart, headerLen, dataSize });
+    i = dataStart + dataSize;
+  }
+  return pages;
+}
+
+function buildOggPage(headerType, granule, serial, pageSeq, pageData) {
+  // Build segment table: split into 255-byte segments
+  const segments = [];
+  let remaining = pageData.length;
+  while (remaining >= 255) { segments.push(255); remaining -= 255; }
+  segments.push(remaining); // final segment (0-254), 0 if exact multiple of 255
+  const numSeg = segments.length;
+  const headerLen = 27 + numSeg;
+  const page = new Uint8Array(headerLen + pageData.length);
+  const view = new DataView(page.buffer);
+  // "OggS"
+  page[0]=0x4F; page[1]=0x67; page[2]=0x67; page[3]=0x53;
+  page[4] = 0; // version
+  page[5] = headerType;
+  view.setBigInt64(6, granule, true);
+  view.setUint32(14, serial, true);
+  view.setUint32(18, pageSeq, true);
+  // CRC placeholder (bytes 22-25) = 0
+  page[26] = numSeg;
+  for (let s = 0; s < numSeg; s++) page[27 + s] = segments[s];
+  page.set(pageData, headerLen);
+  // Compute CRC over entire page with CRC field = 0
+  const crc = oggCrc32(page);
+  view.setUint32(22, crc, true);
+  return page;
+}
+
+// Extract packet boundaries from an OGG page's segment table
+function getPacketBoundaries(segTable) {
+  const packets = [];
+  let offset = 0;
+  for (let i = 0; i < segTable.length; i++) {
+    offset += segTable[i];
+    if (segTable[i] < 255) { // End of packet
+      packets.push(offset);
+      offset = 0;
+    }
+  }
+  if (offset > 0) packets.push(offset); // Incomplete packet (continues on next page)
+  return packets;
+}
+
+function parseOggComments(buffer) {
+  const pages = parseOggPages(buffer);
+  if (pages.length < 2) throw new Error('Not enough OGG pages');
+  const page0data = pages[0].pageData;
+  const page1data = pages[1].pageData;
+  const dec = new TextDecoder('utf-8');
+
+  let isOpus = false;
+  let commentOffset = 0;
+
+  // Detect format from first page
+  if (dec.decode(page0data.slice(0, 8)) === 'OpusHead') {
+    isOpus = true;
+    if (dec.decode(page1data.slice(0, 8)) !== 'OpusTags') throw new Error('Missing OpusTags');
+    commentOffset = 8;
+  } else if (page0data[0] === 0x01 && dec.decode(page0data.slice(1, 7)) === 'vorbis') {
+    if (page1data[0] !== 0x03 || dec.decode(page1data.slice(1, 7)) !== 'vorbis') throw new Error('Missing vorbis comment header');
+    commentOffset = 7;
+  } else {
+    throw new Error('Not an OGG Vorbis or Opus file');
+  }
+
+  // Find comment packet size using segment table (first packet in page 1)
+  const packetSizes = getPacketBoundaries(pages[1].segTable);
+  const commentPacketSize = packetSizes[0];
+  // Remaining data in page 1 after comment packet (e.g. Vorbis setup header)
+  const trailingData = page1data.slice(commentPacketSize);
+
+  // Parse Vorbis comments from the comment packet only
+  let pos = commentOffset;
+  const dv = new DataView(page1data.buffer, page1data.byteOffset);
+  const vendorLen = dv.getUint32(pos, true); pos += 4;
+  const vendorString = dec.decode(page1data.slice(pos, pos + vendorLen)); pos += vendorLen;
+  const count = dv.getUint32(pos, true); pos += 4;
+  const tags = [];
+  for (let i = 0; i < count; i++) {
+    const clen = dv.getUint32(pos, true); pos += 4;
+    const comment = dec.decode(page1data.slice(pos, pos + clen)); pos += clen;
+    const eq = comment.indexOf('=');
+    if (eq > 0) tags.push([comment.slice(0, eq).toUpperCase(), comment.slice(eq + 1)]);
+  }
+
+  return { tags, vendorString, pages, isOpus, serial: pages[0].serial, trailingData, commentPacketSize };
+}
+
+function buildOggPageMultiPacket(headerType, granule, serial, pageSeq, packets) {
+  // Build segment table for multiple packets
+  const segments = [];
+  for (let pi = 0; pi < packets.length; pi++) {
+    const pkt = packets[pi];
+    let remaining = pkt.length;
+    while (remaining >= 255) { segments.push(255); remaining -= 255; }
+    segments.push(remaining); // final segment for this packet
+  }
+  const numSeg = segments.length;
+  const totalData = packets.reduce((s, p) => s + p.length, 0);
+  const headerLen = 27 + numSeg;
+  const page = new Uint8Array(headerLen + totalData);
+  const view = new DataView(page.buffer);
+  page[0]=0x4F; page[1]=0x67; page[2]=0x67; page[3]=0x53;
+  page[4] = 0;
+  page[5] = headerType;
+  view.setBigInt64(6, granule, true);
+  view.setUint32(14, serial, true);
+  view.setUint32(18, pageSeq, true);
+  page[26] = numSeg;
+  for (let s = 0; s < numSeg; s++) page[27 + s] = segments[s];
+  let pos = headerLen;
+  for (const pkt of packets) { page.set(pkt, pos); pos += pkt.length; }
+  const crc = oggCrc32(page);
+  view.setUint32(22, crc, true);
+  return page;
+}
+
+function writeOggComments(buffer, tags, meta) {
+  const { vendorString, pages, isOpus, serial, trailingData } = meta;
+  const enc = new TextEncoder();
+
+  // Build new comment packet
+  const magic = isOpus ? enc.encode('OpusTags') : new Uint8Array([0x03, ...enc.encode('vorbis')]);
+  const vendorBytes = enc.encode(vendorString);
+  const encoded = tags.filter(([k]) => k.trim()).map(([k, v]) => enc.encode(k.toUpperCase() + '=' + v));
+
+  let packetSize = magic.length + 4 + vendorBytes.length + 4;
+  for (const c of encoded) packetSize += 4 + c.length;
+  // For Vorbis (not Opus), add framing bit
+  if (!isOpus) packetSize += 1;
+
+  const packet = new Uint8Array(packetSize);
+  const pv = new DataView(packet.buffer);
+  let pos = 0;
+  packet.set(magic, pos); pos += magic.length;
+  pv.setUint32(pos, vendorBytes.length, true); pos += 4;
+  packet.set(vendorBytes, pos); pos += vendorBytes.length;
+  pv.setUint32(pos, encoded.length, true); pos += 4;
+  for (const c of encoded) {
+    pv.setUint32(pos, c.length, true); pos += 4;
+    packet.set(c, pos); pos += c.length;
+  }
+  if (!isOpus) packet[pos] = 1; // framing bit
+
+  // Build page 1 with comment packet + any trailing packets (e.g. Vorbis setup header)
+  let newPage1;
+  if (trailingData && trailingData.length > 0) {
+    newPage1 = buildOggPageMultiPacket(
+      pages[1].headerType,
+      pages[1].granule,
+      serial,
+      pages[1].pageSeq,
+      [packet, trailingData]
+    );
+  } else {
+    newPage1 = buildOggPage(
+      pages[1].headerType,
+      pages[1].granule,
+      serial,
+      pages[1].pageSeq,
+      packet
+    );
+  }
+
+  // Rebuild page 0 from raw bytes
+  const page0Raw = new Uint8Array(buffer, pages[0].pageStart, pages[0].headerLen + pages[0].dataSize);
+
+  // Calculate total size
+  let totalSize = page0Raw.length + newPage1.length;
+  for (let i = 2; i < pages.length; i++) totalSize += pages[i].headerLen + pages[i].dataSize;
+
+  const out = new Uint8Array(totalSize);
+  let outPos = 0;
+  out.set(page0Raw, outPos); outPos += page0Raw.length;
+  out.set(newPage1, outPos); outPos += newPage1.length;
+
+  // Copy remaining pages from original buffer
+  for (let i = 2; i < pages.length; i++) {
+    const p = pages[i];
+    out.set(new Uint8Array(buffer, p.pageStart, p.headerLen + p.dataSize), outPos);
+    outPos += p.headerLen + p.dataSize;
+  }
+
+  return out.buffer;
+}
+
+// ==========
+// Format detection by magic bytes
+// ==========
+
+function detectFormat(buffer) {
+  const b = new Uint8Array(buffer);
+  if (b[0]===0x66&&b[1]===0x4C&&b[2]===0x61&&b[3]===0x43) return 'flac';
+  if (b[0]===0x49&&b[1]===0x44&&b[2]===0x33) return 'mp3';
+  if (b[0]===0xFF&&(b[1]&0xE0)===0xE0) return 'mp3';
+  if (b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70) return 'm4a';
+  // OGG: starts with "OggS"
+  if (b[0]===0x4F&&b[1]===0x67&&b[2]===0x67&&b[3]===0x53) {
+    // Check first page data for codec type
+    const numSeg = b[26];
+    const dataStart = 27 + numSeg;
+    const dec = new TextDecoder('latin1');
+    const magic = dec.decode(b.slice(dataStart, dataStart + 8));
+    if (magic === 'OpusHead') return 'opus';
+    if (b[dataStart] === 0x01 && dec.decode(b.slice(dataStart+1, dataStart+7)) === 'vorbis') return 'ogg';
+    return 'ogg'; // fallback
+  }
+  return null;
+}
+
+// ==========
+// ID3v2
+// ==========
+
+function parseId3(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+
+  if (bytes[0] !== 0x49 || bytes[1] !== 0x44 || bytes[2] !== 0x33)
+    return { tags: [], rawFrames: [], headerSize: 0 };
+
+  const majorVer = bytes[3];
+  const tagSize = ((bytes[6] & 0x7F) << 21) | ((bytes[7] & 0x7F) << 14) |
+                  ((bytes[8] & 0x7F) << 7)  |  (bytes[9] & 0x7F);
+  const headerSize = 10 + tagSize;
+
+  const dec8    = new TextDecoder('latin1');
+  const dec16   = new TextDecoder('utf-16');
+  const dec16be = new TextDecoder('utf-16be');
+  const dec8u   = new TextDecoder('utf-8');
+
+  function getDecoder(enc) {
+    if (enc === 0) return dec8;
+    if (enc === 1) return dec16;
+    if (enc === 2) return dec16be;
+    return dec8u;
+  }
+
+  const tags = [];
+  const rawFrames = [];
+  let offset = 10;
+
+  while (offset + 10 <= headerSize && offset + 10 <= buffer.byteLength) {
+    const id = String.fromCharCode(bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3]);
+    if (id === '\0\0\0\0' || !/^[A-Z0-9]{4}$/.test(id)) break;
+
+    let frameSize;
+    if (majorVer >= 4) {
+      frameSize = ((bytes[offset+4] & 0x7F) << 21) | ((bytes[offset+5] & 0x7F) << 14) |
+                  ((bytes[offset+6] & 0x7F) << 7)  |  (bytes[offset+7] & 0x7F);
+    } else {
+      frameSize = view.getUint32(offset + 4, false);
+    }
+
+    const ds = offset + 10;
+    const de = ds + frameSize;
+    if (frameSize <= 0 || de > buffer.byteLength) break;
+
+    if (id.startsWith('T') && id !== 'TXXX') {
+      const enc = bytes[ds];
+      const decoded = getDecoder(enc).decode(new Uint8Array(buffer, ds + 1, frameSize - 1));
+      tags.push([id, decoded.replace(/\0+/g, '').trim()]);
+    } else if (id === 'TXXX') {
+      const enc = bytes[ds];
+      const full = getDecoder(enc).decode(new Uint8Array(buffer, ds + 1, frameSize - 1));
+      const ni = full.indexOf('\0');
+      const desc = ni >= 0 ? full.slice(0, ni) : full;
+      const val  = ni >= 0 ? full.slice(ni + 1).replace(/\0+$/, '') : '';
+      tags.push(['TXXX:' + desc, val]);
+    } else if (id === 'USLT') {
+      // Unsynchronized lyrics: encoding(1) + lang(3) + descriptor(null-term) + lyrics text
+      const enc = bytes[ds];
+      const decoder = getDecoder(enc);
+      // Skip language (3 bytes), then find end of content descriptor (null terminated)
+      let pos = ds + 1 + 3; // after encoding byte + 3-byte lang
+      const frameEnd = de;
+      // Find null terminator of content descriptor
+      while (pos < frameEnd) {
+        if (enc === 1 || enc === 2) {
+          // UTF-16: 2-byte nulls
+          if (bytes[pos] === 0 && bytes[pos+1] === 0) { pos += 2; break; }
+          pos += 2;
+        } else {
+          if (bytes[pos] === 0) { pos += 1; break; }
+          pos += 1;
+        }
+      }
+      const lyricsText = decoder.decode(new Uint8Array(buffer, pos, frameEnd - pos)).replace(/\0+$/, '');
+      tags.push([id, lyricsText]);
+    } else if (id === 'COMM') {
+      // Comment: encoding(1) + lang(3) + short desc(null-term) + text
+      const enc = bytes[ds];
+      const decoder = getDecoder(enc);
+      let pos = ds + 1 + 3;
+      const frameEnd = de;
+      while (pos < frameEnd) {
+        if (enc === 1 || enc === 2) {
+          if (bytes[pos] === 0 && bytes[pos+1] === 0) { pos += 2; break; }
+          pos += 2;
+        } else {
+          if (bytes[pos] === 0) { pos += 1; break; }
+          pos += 1;
+        }
+      }
+      const commentText = decoder.decode(new Uint8Array(buffer, pos, frameEnd - pos)).replace(/\0+$/, '');
+      tags.push([id, commentText]);
+    } else {
+      rawFrames.push({ id, data: new Uint8Array(buffer, ds, frameSize) });
+    }
+
+    offset = de;
+  }
+
+  return { tags, rawFrames, headerSize };
+}
+
+function writeId3(audioBuffer, tags, rawFrames) {
+  const enc = new TextEncoder();
+  const frames = [];
+
+  for (const [rawKey, value] of tags) {
+    const key = rawKey.toUpperCase().trim();
+    if (!key) continue;
+    const valBytes = enc.encode(value);
+
+    if (key.startsWith('TXXX:')) {
+      const desc = rawKey.slice(5);
+      const descBytes = enc.encode(desc);
+      const d = new Uint8Array(1 + descBytes.length + 1 + valBytes.length);
+      d[0] = 3; // UTF-8
+      d.set(descBytes, 1);
+      d[1 + descBytes.length] = 0;
+      d.set(valBytes, 1 + descBytes.length + 1);
+      frames.push({ id: 'TXXX', data: d });
+    } else if (key === 'USLT') {
+      // encoding(1) + lang(3) + descriptor NUL(1) + lyrics
+      const lang = enc.encode('eng');
+      const d = new Uint8Array(1 + 3 + 1 + valBytes.length);
+      d[0] = 3; // UTF-8
+      d.set(lang, 1);
+      d[4] = 0; // empty descriptor + null
+      d.set(valBytes, 5);
+      frames.push({ id: 'USLT', data: d });
+    } else if (key === 'COMM') {
+      // encoding(1) + lang(3) + descriptor NUL(1) + text
+      const lang = enc.encode('eng');
+      const d = new Uint8Array(1 + 3 + 1 + valBytes.length);
+      d[0] = 3; // UTF-8
+      d.set(lang, 1);
+      d[4] = 0;
+      d.set(valBytes, 5);
+      frames.push({ id: 'COMM', data: d });
+    } else if (/^[A-Z0-9]{4}$/.test(key)) {
+      const d = new Uint8Array(1 + valBytes.length);
+      d[0] = 3; // UTF-8
+      d.set(valBytes, 1);
+      frames.push({ id: key, data: d });
+    }
+  }
+
+  for (const rf of rawFrames) frames.push(rf);
+
+  let contentSize = 0;
+  for (const f of frames) contentSize += 10 + f.data.length;
+  // Pad to next 4KB boundary
+  const padded = Math.ceil((contentSize + 10) / 4096) * 4096;
+
+  const out = new Uint8Array(10 + padded + audioBuffer.byteLength);
+  const outView = new DataView(out.buffer);
+
+  out[0] = 0x49; out[1] = 0x44; out[2] = 0x33; // ID3
+  out[3] = 0x03; out[4] = 0x00; out[5] = 0x00;  // v2.3, no flags
+  out[6] = (padded >> 21) & 0x7F;
+  out[7] = (padded >> 14) & 0x7F;
+  out[8] = (padded >>  7) & 0x7F;
+  out[9] =  padded        & 0x7F;
+
+  let pos = 10;
+  for (const f of frames) {
+    for (let i = 0; i < 4; i++) out[pos + i] = f.id.charCodeAt(i);
+    outView.setUint32(pos + 4, f.data.length, false);
+    out[pos + 8] = 0; out[pos + 9] = 0;
+    pos += 10;
+    out.set(f.data, pos);
+    pos += f.data.length;
+  }
+
+  // padding already zero
+  pos = 10 + padded;
+  out.set(new Uint8Array(audioBuffer), pos);
+
+  return out.buffer;
+}
+
+// ======
+// UI
+// ======
+
+const dropZone  = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const tagSection = document.getElementById('tag-section');
+const tagBody   = document.getElementById('tag-body');
+const fileInfo  = document.getElementById('file-info');
+const statusEl  = document.getElementById('status');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag-over'); loadFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => loadFile(e.target.files[0]));
+
+function loadFile(file) {
+  if (!file) return;
+  currentFile = file;
+  const reader = new FileReader();
+  reader.onload = e => {
+    currentBuffer = e.target.result;
+    try {
+      const fmt = detectFormat(currentBuffer);
+      if (fmt === 'flac') {
+        currentFormat = 'flac';
+        parsedMeta = parseFlac(currentBuffer);
+        showTags(parsedMeta.tags, 'FLAC');
+      } else if (fmt === 'mp3') {
+        currentFormat = 'mp3';
+        parsedMeta = parseId3(currentBuffer);
+        showTags(parsedMeta.tags, 'MP3');
+      } else if (fmt === 'm4a') {
+        currentFormat = 'm4a';
+        const result = parseM4a(currentBuffer);
+        parsedMeta = result.ilstInfo;
+        showTags(result.tags, 'M4A');
+      } else if (fmt === 'ogg') {
+        currentFormat = 'ogg';
+        parsedMeta = parseOggComments(currentBuffer);
+        showTags(parsedMeta.tags, 'OGG');
+      } else if (fmt === 'opus') {
+        currentFormat = 'opus';
+        parsedMeta = parseOggComments(currentBuffer);
+        showTags(parsedMeta.tags, 'OPUS');
+      } else {
+        setStatus('unsupported format', true);
+      }
+    } catch (err) {
+      setStatus('parse error: ' + err.message, true);
+      console.error(err);
+    }
+  };
+  reader.onerror = () => setStatus('failed to read file', true);
+  reader.readAsArrayBuffer(file);
+}
+
+function parseAudioInfo(buffer, format) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  const info = {};
+
+  if (format === 'flac') {
+    // STREAMINFO is always block type 0, starts at offset 4
+    let off = 4;
+    while (off + 4 <= buffer.byteLength) {
+      const btype = bytes[off] & 0x7F;
+      const blen = (bytes[off+1] << 16) | (bytes[off+2] << 8) | bytes[off+3];
+      const isLast = !!(bytes[off] & 0x80);
+      if (btype === 0 && blen >= 18) {
+        const d = off + 4;
+        // bits 80-99: sample rate (20 bits) at byte 10
+        const b10 = bytes[d+10], b11 = bytes[d+11], b12 = bytes[d+12];
+        info.sampleRate = (b10 << 12) | (b11 << 4) | (b12 >> 4);
+        // bits 100-102: channels-1 (3 bits)
+        info.channels = ((b12 >> 1) & 0x07) + 1;
+        // bits 103-107: bps-1 (5 bits)
+        const b13 = bytes[d+13];
+        info.bitDepth = (((b12 & 0x01) << 4) | (b13 >> 4)) + 1;
+        // bits 108-143: total samples (36 bits)
+        const totalSamples = ((b13 & 0x0F) * 4294967296) +
+          ((bytes[d+14] << 24) | (bytes[d+15] << 16) | (bytes[d+16] << 8) | bytes[d+17]);
+        info.duration = info.sampleRate ? totalSamples / info.sampleRate : 0;
+        // Bitrate from file size
+        if (info.duration > 0) info.bitrate = Math.round((buffer.byteLength * 8) / info.duration / 1000);
+        break;
+      }
+      off += 4 + blen;
+      if (isLast) break;
+    }
+
+  } else if (format === 'mp3') {
+    // Find first MPEG frame after ID3
+    const startOff = parsedMeta ? parsedMeta.headerSize : 0;
+    const MP3_BITRATES = [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0];
+    const MP3_SAMPLERATES = [44100,48000,32000,0];
+    for (let i = startOff; i < Math.min(buffer.byteLength - 4, startOff + 16384); i++) {
+      if (bytes[i] === 0xFF && (bytes[i+1] & 0xE0) === 0xE0) {
+        const h2 = bytes[i+2], h3 = bytes[i+3];
+        const bitrateIdx = (h2 >> 4) & 0xF;
+        const srateIdx = (h2 >> 2) & 0x3;
+        const channelMode = (h3 >> 6) & 0x3;
+        if (bitrateIdx > 0 && bitrateIdx < 15 && srateIdx < 3) {
+          info.bitrate = MP3_BITRATES[bitrateIdx];
+          info.sampleRate = MP3_SAMPLERATES[srateIdx];
+          info.channels = channelMode === 3 ? 1 : 2;
+          info.bitDepth = 16; // MP3 is always decoded to 16-bit PCM
+          if (info.bitrate > 0) info.duration = (buffer.byteLength - startOff) * 8 / (info.bitrate * 1000);
+          break;
+        }
+      }
+    }
+
+  } else if (format === 'ogg') {
+    // OGG Vorbis: ID header is page 0 data after \x01vorbis (7 bytes)
+    const pages = parsedMeta ? parsedMeta.pages : parseOggPages(buffer);
+    if (pages.length > 0) {
+      const p0 = pages[0].pageData;
+      if (p0[0] === 0x01 && p0.length >= 30) {
+        const dv = new DataView(p0.buffer, p0.byteOffset);
+        // Vorbis ID header: version(4) + channels(1) + sampleRate(4) + ...
+        info.channels = p0[11];
+        info.sampleRate = dv.getUint32(12, true);
+        const bitrateMax = dv.getInt32(16, true);
+        const bitrateNom = dv.getInt32(20, true);
+        const bitrateMin = dv.getInt32(24, true);
+        info.bitrate = bitrateNom > 0 ? Math.round(bitrateNom / 1000) : undefined;
+        // Estimate duration from file size and bitrate
+        if (info.bitrate > 0) info.duration = (buffer.byteLength * 8) / (info.bitrate * 1000);
+        // Better: use last page's granule position
+        const lastPage = pages[pages.length - 1];
+        if (lastPage.granule > 0n && info.sampleRate) {
+          info.duration = Number(lastPage.granule) / info.sampleRate;
+          info.bitrate = Math.round((buffer.byteLength * 8) / info.duration / 1000);
+        }
+      }
+    }
+
+  } else if (format === 'opus') {
+    // Opus: OpusHead is page 0 data
+    const pages = parsedMeta ? parsedMeta.pages : parseOggPages(buffer);
+    if (pages.length > 0) {
+      const p0 = pages[0].pageData;
+      if (p0.length >= 19) {
+        info.channels = p0[9];
+        const dv = new DataView(p0.buffer, p0.byteOffset);
+        info.sampleRate = dv.getUint32(12, true); // original sample rate
+        // Opus always decodes to 48kHz internally but stores original sample rate
+        // Use last page granule for duration (Opus always uses 48kHz for granule)
+        const lastPage = pages[pages.length - 1];
+        if (lastPage.granule > 0n) {
+          info.duration = Number(lastPage.granule) / 48000;
+          info.bitrate = Math.round((buffer.byteLength * 8) / info.duration / 1000);
+        }
+      }
+    }
+
+  } else if (format === 'm4a') {
+    // Walk atoms to find mvhd (duration/timescale) and mp4a (channels, sample rate)
+    function walkAtoms(startOff, endOff, cb) {
+      let off = startOff;
+      while (off + 8 <= endOff) {
+        const size = view.getUint32(off);
+        if (size < 8 || off + size > endOff) break;
+        const type = String.fromCharCode(bytes[off+4], bytes[off+5], bytes[off+6], bytes[off+7]);
+        cb(type, off, size);
+        off += size;
+      }
+    }
+    function findAtom(startOff, endOff, target) {
+      let found = null;
+      walkAtoms(startOff, endOff, (type, off, size) => { if (type === target) found = {off, size}; });
+      return found;
+    }
+    const moov = findAtom(0, buffer.byteLength, 'moov');
+    if (moov) {
+      // mvhd: version(1) + flags(3) + creation(4) + mod(4) + timescale(4) + duration(4) [v0]
+      const mvhd = findAtom(moov.off + 8, moov.off + moov.size, 'mvhd');
+      if (mvhd) {
+        const v = bytes[mvhd.off + 8]; // version
+        const tsOff = mvhd.off + 8 + (v === 1 ? 28 : 12);
+        const durOff = tsOff + 4;
+        const timescale = view.getUint32(tsOff);
+        const duration = v === 1 ? Number(view.getBigUint64(durOff)) : view.getUint32(durOff);
+        info.duration = timescale ? duration / timescale : 0;
+      }
+      // trak → mdia → minf → stbl → stsd → mp4a
+      const trak = findAtom(moov.off + 8, moov.off + moov.size, 'trak');
+      if (trak) {
+        const mdia = findAtom(trak.off + 8, trak.off + trak.size, 'mdia');
+        if (mdia) {
+          const minf = findAtom(mdia.off + 8, mdia.off + mdia.size, 'minf');
+          if (minf) {
+            const stbl = findAtom(minf.off + 8, minf.off + minf.size, 'stbl');
+            if (stbl) {
+              const stsd = findAtom(stbl.off + 8, stbl.off + stbl.size, 'stsd');
+              if (stsd) {
+                // stsd: version(1)+flags(3)+entry_count(4), then first entry
+                const entryOff = stsd.off + 8 + 8; // skip stsd header + entry count
+                // Look for mp4a (AAC) or alac atom — both have same sample entry layout
+                const audioAtom = findAtom(entryOff, stsd.off + stsd.size, 'mp4a')
+                                || findAtom(entryOff, stsd.off + stsd.size, 'alac');
+                if (audioAtom) {
+                  // Audio sample entry layout after 8-byte box header:
+                  // +0: 6 reserved, +6: 2 data_ref_index, +8: 8 reserved,
+                  // +16: 2 channelcount, +18: 2 samplesize, +20: 2 pre_defined,
+                  // +22: 2 reserved, +24: 4 samplerate (16.16 fixed-point)
+                  const base = audioAtom.off + 8;
+                  info.channels = view.getUint16(base + 16);
+                  info.bitDepth = view.getUint16(base + 18);
+                  info.sampleRate = view.getUint32(base + 24) >>> 16;
+                }
+              }
+            }
+          }
+        }
+      }
+      if (info.duration > 0) info.bitrate = Math.round((buffer.byteLength * 8) / info.duration / 1000);
+    }
+  }
+
+  return info;
+}
+
+function fmtDuration(secs) {
+  if (!secs) return '—';
+  const m = Math.floor(secs / 60), s = Math.floor(secs % 60);
+  return m + ':' + String(s).padStart(2, '0');
+}
+
+function showAudioInfo(info) {
+  const el = document.getElementById('audio-info');
+  const stats = [
+    ['duration',    fmtDuration(info.duration)],
+    ['sample rate', info.sampleRate ? (info.sampleRate / 1000).toFixed(1) + ' kHz' : '—'],
+    ['bit depth',   info.bitDepth ? info.bitDepth + ' bit' : '—'],
+    ['bitrate',     info.bitrate ? info.bitrate + ' kbps' : '—'],
+    ['channels',    info.channels === 1 ? 'mono' : info.channels === 2 ? 'stereo' : info.channels ? info.channels + 'ch' : '—'],
+  ];
+  el.innerHTML = stats.map(([label, val]) =>
+    `<div class="ai-stat"><span>${label}</span><span>${val}</span></div>`
+  ).join('');
+}
+
+function showTags(tags, format) {
+  const badge = `<span class="format-badge ${format.toLowerCase()}">${format}</span>`;
+  const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(2);
+  fileInfo.innerHTML = `<strong>${esc(currentFile.name)}</strong>${badge}<span class="file-size">${sizeMB}&nbsp;MB</span>`;
+  try { showAudioInfo(parseAudioInfo(currentBuffer, currentFormat)); } catch(e) { document.getElementById('audio-info').innerHTML = ''; }
+  tagBody.innerHTML = '';
+  for (const [k, v] of tags) addRow(k, v);
+  updateFieldPicker();
+  setupFilenameSection(currentFile.name);
+  tagSection.style.display = 'block';
+  dropZone.classList.add('loaded');
+  dropZone.textContent = 'drop audio file here';
+  updateFilenamePreview();
+  setStatus(tags.length + ' tags');
+}
+
+function addRow(key = '', value = '') {
+  const tr = document.createElement('tr');
+  // For MP3, translate frame IDs to friendly names for display
+  const displayKey = (currentFormat === 'mp3' && ID3_DISPLAY[key.toUpperCase()])
+    ? ID3_DISPLAY[key.toUpperCase()] : key;
+  // Display value: collapse newlines to spaces for the single-line input
+  const displayVal = value.replace(/\r\n|\r|\n/g, ' ');
+  tr.innerHTML = `
+    <td class="key-col"><input type="text" value="${esc(displayKey)}" placeholder="KEY" oninput="updateFilenamePreview()"></td>
+    <td><input type="text" value="${esc(displayVal)}" placeholder="value" oninput="this.dataset.raw=this.value; updateFilenamePreview()"></td>
+    <td class="act-col">
+      <button class="exp-btn" onclick="openModal(this)" title="edit in full view">≡</button>
+      <button class="del-btn" onclick="this.closest('tr').remove(); updateFieldPicker(); updateFilenamePreview()">×</button>
+    </td>`;
+  tagBody.appendChild(tr);
+  // Store raw (multiline-safe) value in data attribute
+  const valInput = tr.querySelectorAll('input')[1];
+  valInput.dataset.raw = value;
+  if (!key) tr.querySelector('input').focus();
+}
+
+function getTags() {
+  return Array.from(tagBody.querySelectorAll('tr')).map(tr => {
+    const ins = tr.querySelectorAll('input');
+    let key = ins[0].value.trim();
+    // For MP3, translate friendly display names back to real frame IDs
+    if (currentFormat === 'mp3') {
+      const frameId = ID3_FROM_DISPLAY[key.toUpperCase()];
+      if (frameId) key = frameId;
+    }
+    // Use raw (multiline-preserved) value if available, fall back to input.value
+    const raw = ins[1].dataset.raw !== undefined ? ins[1].dataset.raw : ins[1].value;
+    return [key, raw];
+  }).filter(([k]) => k);
+}
+
+function saveFile() {
+  try {
+    const tags = getTags();
+    let out, mime;
+    if (currentFormat === 'flac') {
+      out = writeFlac(currentBuffer, tags, parsedMeta);
+      mime = 'audio/flac';
+    } else if (currentFormat === 'm4a') {
+      out = writeM4a(currentBuffer, tags, parsedMeta);
+      mime = 'audio/mp4';
+    } else if (currentFormat === 'ogg') {
+      out = writeOggComments(currentBuffer, tags, parsedMeta);
+      mime = 'audio/ogg';
+    } else if (currentFormat === 'opus') {
+      out = writeOggComments(currentBuffer, tags, parsedMeta);
+      mime = 'audio/opus';
+    } else {
+      const audio = currentBuffer.slice(parsedMeta.headerSize);
+      out = writeId3(audio, tags, parsedMeta.rawFrames);
+      mime = 'audio/mpeg';
+    }
+    const a = Object.assign(document.createElement('a'), {
+      href: URL.createObjectURL(new Blob([out], { type: mime })),
+      download: resolveFilename()
+    });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    setStatus('downloaded!');
+  } catch (err) {
+    setStatus('error: ' + err.message, true);
+    console.error(err);
+  }
+}
+
+const VAR_FIELDS = [
+  ['%title%',       { flac: 'TITLE',       mp3: 'TIT2', m4a: 'TITLE',       ogg: 'TITLE',       opus: 'TITLE'       }],
+  ['%artist%',      { flac: 'ARTIST',      mp3: 'TPE1', m4a: 'ARTIST',      ogg: 'ARTIST',      opus: 'ARTIST'      }],
+  ['%album%',       { flac: 'ALBUM',       mp3: 'TALB', m4a: 'ALBUM',       ogg: 'ALBUM',       opus: 'ALBUM'       }],
+  ['%albumartist%', { flac: 'ALBUMARTIST', mp3: 'TPE2', m4a: 'ALBUMARTIST', ogg: 'ALBUMARTIST', opus: 'ALBUMARTIST' }],
+  ['%track%',       { flac: 'TRACKNUMBER', mp3: 'TRCK', m4a: 'TRACKNUMBER', ogg: 'TRACKNUMBER', opus: 'TRACKNUMBER' }],
+  ['%disc%',        { flac: 'DISCNUMBER',  mp3: 'TPOS', m4a: 'DISCNUMBER',  ogg: 'DISCNUMBER',  opus: 'DISCNUMBER'  }],
+  ['%year%',        { flac: 'DATE',        mp3: 'TDRC', m4a: 'DATE',        ogg: 'DATE',        opus: 'DATE'        }],
+  ['%genre%',       { flac: 'GENRE',       mp3: 'TCON', m4a: 'GENRE',       ogg: 'GENRE',       opus: 'GENRE'       }],
+];
+
+let currentExt = '';
+
+function setupFilenameSection(filename) {
+  const dotIdx = filename.lastIndexOf('.');
+  currentExt = dotIdx >= 0 ? filename.slice(dotIdx) : '';
+  const base = dotIdx >= 0 ? filename.slice(0, dotIdx) : filename;
+  document.getElementById('filename-input').value = base;
+  document.getElementById('filename-ext').textContent = currentExt;
+  const varsEl = document.getElementById('filename-vars');
+  varsEl.innerHTML = '';
+  for (const [v] of VAR_FIELDS) {
+    const chip = document.createElement('span');
+    chip.className = 'var-chip';
+    chip.textContent = v;
+    chip.onclick = () => insertVar(v);
+    varsEl.appendChild(chip);
+  }
+}
+
+function insertVar(v) {
+  const inp = document.getElementById('filename-input');
+  const s = inp.selectionStart, e = inp.selectionEnd;
+  inp.value = inp.value.slice(0, s) + v + inp.value.slice(e);
+  inp.selectionStart = inp.selectionEnd = s + v.length;
+  inp.focus();
+  updateFilenamePreview();
+}
+
+function updateFilenamePreview() {
+  const el = document.getElementById('filename-preview');
+  if (!currentFile) { el.textContent = ''; return; }
+  el.innerHTML = '→ ' + escHtml(resolveFilename());
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function resolveFilename() {
+  let name = document.getElementById('filename-input').value.trim() || 'output';
+  const tags = getTags();
+  const tagMap = {};
+  for (const [k, v] of tags) tagMap[k.toUpperCase()] = v;
+  for (const [varName, keys] of VAR_FIELDS) {
+    const tagKey = (keys[currentFormat] || '').toUpperCase();
+    const val = (tagMap[tagKey] || '').replace(/[/\\:*?"<>|]/g, '_');
+    name = name.replaceAll(varName, val);
+  }
+  return name + currentExt;
+}
+
+const COMMON_FIELDS = {
+  flac: [
+    ['TITLE',       'Title'],
+    ['ARTIST',      'Artist'],
+    ['ALBUM',       'Album'],
+    ['ALBUMARTIST', 'Album Artist'],
+    ['TRACKNUMBER', 'Track Number'],
+    ['DISCNUMBER',  'Disc Number'],
+    ['DATE',        'Year'],
+    ['GENRE',       'Genre'],
+    ['COMPOSER',    'Composer'],
+    ['BPM',         'BPM'],
+    ['COMMENT',     'Comment'],
+    ['LYRICS',      'Lyrics'],
+    ['',            'Custom...'],
+  ],
+  mp3: [
+    ['TIT2', 'Title'],
+    ['TPE1', 'Artist'],
+    ['TALB', 'Album'],
+    ['TPE2', 'Album Artist'],
+    ['TRCK', 'Track Number'],
+    ['TPOS', 'Disc Number'],
+    ['TDRC', 'Year'],
+    ['TCON', 'Genre'],
+    ['TCOM', 'Composer'],
+    ['TBPM', 'BPM'],
+    ['TXXX:COMMENT', 'Comment'],
+    ['USLT', 'Lyrics'],
+    ['',     'Custom...'],
+  ],
+  m4a: [
+    ['TITLE',       'Title'],
+    ['ARTIST',      'Artist'],
+    ['ALBUM',       'Album'],
+    ['ALBUMARTIST', 'Album Artist'],
+    ['TRACKNUMBER', 'Track Number'],
+    ['DISCNUMBER',  'Disc Number'],
+    ['DATE',        'Year'],
+    ['GENRE',       'Genre'],
+    ['COMPOSER',    'Composer'],
+    ['BPM',         'BPM'],
+    ['COMMENT',     'Comment'],
+    ['LYRICS',      'Lyrics'],
+    ['COPYRIGHT',   'Copyright'],
+    ['',            'Custom...'],
+  ],
+  ogg: [
+    ['TITLE',       'Title'],
+    ['ARTIST',      'Artist'],
+    ['ALBUM',       'Album'],
+    ['ALBUMARTIST', 'Album Artist'],
+    ['TRACKNUMBER', 'Track Number'],
+    ['DISCNUMBER',  'Disc Number'],
+    ['DATE',        'Year'],
+    ['GENRE',       'Genre'],
+    ['COMPOSER',    'Composer'],
+    ['BPM',         'BPM'],
+    ['COMMENT',     'Comment'],
+    ['LYRICS',      'Lyrics'],
+    ['ISRC',        'ISRC'],
+    ['',            'Custom...'],
+  ],
+  opus: [
+    ['TITLE',       'Title'],
+    ['ARTIST',      'Artist'],
+    ['ALBUM',       'Album'],
+    ['ALBUMARTIST', 'Album Artist'],
+    ['TRACKNUMBER', 'Track Number'],
+    ['DISCNUMBER',  'Disc Number'],
+    ['DATE',        'Year'],
+    ['GENRE',       'Genre'],
+    ['COMPOSER',    'Composer'],
+    ['BPM',         'BPM'],
+    ['COMMENT',     'Comment'],
+    ['LYRICS',      'Lyrics'],
+    ['ISRC',        'ISRC'],
+    ['',            'Custom...'],
+  ]
+};
+
+function getUsedKeys() {
+  return new Set(
+    Array.from(tagBody.querySelectorAll('tr')).map(tr => {
+      const k = tr.querySelector('input').value.trim().toUpperCase();
+      // For MP3, normalize display names to frame IDs for dedup comparison
+      if (currentFormat === 'mp3') return ID3_FROM_DISPLAY[k] || k;
+      return k;
+    })
+  );
+}
+
+function updateFieldPicker() {
+  const sel = document.getElementById('field-picker');
+  const fields = COMMON_FIELDS[currentFormat] || [];
+  const used = getUsedKeys();
+  sel.innerHTML = '<option value="">+ field</option>';
+  for (const [key, label] of fields) {
+    if (key && used.has(key.toUpperCase())) continue; // already present
+    const opt = document.createElement('option');
+    opt.value = key;
+    const displayId = (currentFormat === 'mp3' && ID3_DISPLAY[key]) ? ID3_DISPLAY[key] : key;
+    opt.textContent = key ? `${label} (${displayId})` : 'Custom...';
+    sel.appendChild(opt);
+  }
+}
+
+function pickField(sel) {
+  const val = sel.value;
+  sel.value = '';
+  addRow(val, '');
+  updateFieldPicker();
+}
+
+let _modalInput = null;
+
+function openModal(btn) {
+  const row = btn.closest('tr');
+  const ins = row.querySelectorAll('input[type=text]');
+  _modalInput = ins[1];
+  const key = ins[0].value || 'value';
+  document.getElementById('modal-key').textContent = key;
+  // Use raw value (preserves newlines) for the textarea
+  const raw = _modalInput.dataset.raw !== undefined ? _modalInput.dataset.raw : _modalInput.value;
+  document.getElementById('modal-ta').value = raw;
+  document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('modal-ta').focus();
+}
+
+function closeModal(save) {
+  if (save && _modalInput) {
+    const newVal = document.getElementById('modal-ta').value;
+    // Store raw value in data attribute, show collapsed in input
+    _modalInput.dataset.raw = newVal;
+    _modalInput.value = newVal.replace(/\r\n|\r|\n/g, ' ');
+    updateFilenamePreview();
+  }
+  document.getElementById('modal-overlay').classList.remove('open');
+  _modalInput = null;
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal(false);
+});
+
+function setStatus(msg, isErr = false) {
+  statusEl.textContent = msg;
+  statusEl.className = isErr ? 'err' : '';
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+// Prevent pinch-to-zoom on iOS Safari (ignores user-scalable=no since iOS 10)
+document.addEventListener('touchmove', function(e) {
+  if (e.touches.length > 1) e.preventDefault();
+}, { passive: false });
+// Prevent double-tap zoom
+let _lastTap = 0;
+document.addEventListener('touchend', function(e) {
+  const now = Date.now();
+  if (now - _lastTap < 300) e.preventDefault();
+  _lastTap = now;
+}, { passive: false });
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    // If a new SW is waiting, activate it immediately and reload
+    if (reg.waiting) { reg.waiting.postMessage('skipWaiting'); location.reload(); }
+    reg.addEventListener('updatefound', () => {
+      const nw = reg.installing;
+      nw.addEventListener('statechange', () => {
+        if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+          nw.postMessage('skipWaiting');
+          location.reload();
+        }
+      });
+    });
+  });
+  // Reload when SW controller changes (new SW took over)
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!refreshing) { refreshing = true; location.reload(); }
+  });
+}
+</script>
+</body>
+</html>
