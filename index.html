@@ -2621,6 +2621,18 @@ function addRow(key = '', value = '') {
   // Store raw (multiline-safe) value in data attribute
   const valInput = tr.querySelectorAll('input')[1];
   valInput.dataset.raw = value;
+  // Lyrics/comment fields skip the inline box and go straight to the modal
+  const MODAL_KEYS = new Set(['LYRICS', 'COMMENT', 'UNSYNCEDLYRICS', 'DESCRIPTION', 'USLT', 'COMM']);
+  if (MODAL_KEYS.has(displayKey.toUpperCase()) || MODAL_KEYS.has(key.toUpperCase())) {
+    valInput.readOnly = true;
+    valInput.style.cursor = 'pointer';
+    valInput.title = 'Click to edit';
+    valInput.addEventListener('focus', () => {
+      valInput.blur();
+      openModal(tr.querySelector('.exp-btn'));
+    });
+    valInput.addEventListener('click', () => openModal(tr.querySelector('.exp-btn')));
+  }
   if (!key) tr.querySelector('input').focus();
 }
 
