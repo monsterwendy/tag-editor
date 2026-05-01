@@ -1960,23 +1960,59 @@ fileInput.addEventListener('change', e => { Logger.log('UI', 'file picked via in
 
 /**
  * Handle album art file selection — read the image and update currentArt.
+ * Non-PNG/JPEG formats (WEBP, GIF, AVIF, etc.) are converted to JPEG via canvas
+ * so M4A covr atoms always get a valid type indicator (13=JPEG, 14=PNG).
  * @param {File} file - Image file from file input
  */
 function setArt(file) {
   if (!file) return;
   Logger.log('UI', `setArt: ${file.name} (${file.type}, ${file.size}B)`);
-  const reader = new FileReader();
-  reader.onload = e => {
-    currentArt = {
-      mimeType: file.type || 'image/jpeg',
-      bytes: new Uint8Array(e.target.result),
-      width: 0,
-      height: 0
+  const mime = file.type || '';
+  const supported = mime === 'image/png' || mime === 'image/jpeg';
+
+  if (supported) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      currentArt = {
+        mimeType: mime,
+        bytes: new Uint8Array(e.target.result),
+        width: 0,
+        height: 0
+      };
+      Logger.log('ART', `loaded art: ${currentArt.mimeType} ${currentArt.bytes.length}B`);
+      renderArtPanel();
     };
-    Logger.log('ART', `loaded replacement art: ${currentArt.mimeType} ${currentArt.bytes.length}B`);
-    renderArtPanel();
-  };
-  reader.readAsArrayBuffer(file);
+    reader.readAsArrayBuffer(file);
+  } else {
+    // Convert unsupported format to JPEG via canvas
+    Logger.log('ART', `converting ${mime || 'unknown'} → image/jpeg via canvas`);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const cvs = document.createElement('canvas');
+      cvs.width = img.naturalWidth;
+      cvs.height = img.naturalHeight;
+      cvs.getContext('2d').drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      cvs.toBlob(blob => {
+        blob.arrayBuffer().then(buf => {
+          currentArt = {
+            mimeType: 'image/jpeg',
+            bytes: new Uint8Array(buf),
+            width: img.naturalWidth,
+            height: img.naturalHeight
+          };
+          Logger.log('ART', `converted to JPEG: ${currentArt.bytes.length}B`);
+          renderArtPanel();
+        });
+      }, 'image/jpeg', 0.92);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      Logger.log('ART', `failed to load image for conversion`);
+    };
+    img.src = url;
+  }
 }
 document.getElementById('art-file-input').addEventListener('change', e => { setArt(e.target.files[0]); e.target.value = ''; });
 
