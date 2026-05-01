@@ -391,6 +391,18 @@ function parseM4a(buffer) {
         }
         if (val) tags.push([friendly, val]);
       }
+    } else if (child.type === '----') {
+      // iTunes freeform atom: ----:mean:name
+      const nameAtom = findIn(child.data, child.start+child.size, 'name');
+      const dataAtom = findIn(child.data, child.start+child.size, 'data');
+      if (nameAtom && dataAtom && dataAtom.size >= 16) {
+        const nameLen = nameAtom.size - 12; // 8 header + 4 flags
+        const fieldName = new TextDecoder('utf-8').decode(new Uint8Array(buffer, nameAtom.data + 4, nameLen));
+        const cStart = dataAtom.data + 8;
+        const cLen = (dataAtom.start + dataAtom.size) - cStart;
+        const val = new TextDecoder('utf-8').decode(new Uint8Array(buffer, cStart, cLen));
+        if (fieldName && val) tags.push([fieldName, val]);
+      }
     }
     off += child.size;
   }
@@ -412,7 +424,36 @@ function writeM4a(buffer, tags, ilstInfo) {
   const atoms = [];
   for (const [key, value] of tags) {
     const atomType = M4A_REVERSE_MAP[key.toUpperCase().trim()];
-    if (!atomType) continue;
+
+    if (!atomType) {
+      // Unknown key: write as iTunes freeform atom ----:com.apple.iTunes:FIELDNAME
+      const meanStr = 'com.apple.iTunes';
+      const nameStr = key.trim();
+      const meanBytes = enc.encode(meanStr);
+      const nameBytes = enc.encode(nameStr);
+      const valueBytes = enc.encode(value);
+      // mean atom: size(4) + 'mean'(4) + flags(4) + content
+      const meanSize = 8 + 4 + meanBytes.length;
+      // name atom: size(4) + 'name'(4) + flags(4) + content
+      const nameSize = 8 + 4 + nameBytes.length;
+      // data atom: size(4) + 'data'(4) + type(4) + locale(4) + content
+      const dataSize = 8 + 4 + 4 + valueBytes.length;
+      const totalSize = 8 + meanSize + nameSize + dataSize;
+      const child = new Uint8Array(totalSize);
+      const cv = new DataView(child.buffer);
+      let p = 0;
+      cv.setUint32(p, totalSize, false); child.set(enc.encode('----'), p+4); p += 8;
+      cv.setUint32(p, meanSize, false); child.set(enc.encode('mean'), p+4);
+      // flags = 0
+      child.set(meanBytes, p + 12); p += meanSize;
+      cv.setUint32(p, nameSize, false); child.set(enc.encode('name'), p+4);
+      child.set(nameBytes, p + 12); p += nameSize;
+      cv.setUint32(p, dataSize, false); child.set(enc.encode('data'), p+4);
+      cv.setUint32(p + 8, 1, false); // type = UTF-8
+      child.set(valueBytes, p + 16); p += dataSize;
+      atoms.push(child);
+      continue;
+    }
 
     let content, ti;
     if (atomType === 'trkn' || atomType === 'disk') {
@@ -872,6 +913,15 @@ function writeId3(audioBuffer, tags, rawFrames) {
       d[0] = 3; // UTF-8
       d.set(valBytes, 1);
       frames.push({ id: key, data: d });
+    } else {
+      // Unknown key: store as TXXX frame with key as description
+      const descBytes = enc.encode(rawKey.trim());
+      const d = new Uint8Array(1 + descBytes.length + 1 + valBytes.length);
+      d[0] = 3; // UTF-8
+      d.set(descBytes, 1);
+      d[1 + descBytes.length] = 0; // null separator
+      d.set(valBytes, 1 + descBytes.length + 1);
+      frames.push({ id: 'TXXX', data: d });
     }
   }
 
@@ -1172,8 +1222,17 @@ function showTags(tags, format) {
 function addRow(key = '', value = '') {
   const tr = document.createElement('tr');
   // For MP3, translate frame IDs to friendly names for display
-  const displayKey = (currentFormat === 'mp3' && ID3_DISPLAY[key.toUpperCase()])
-    ? ID3_DISPLAY[key.toUpperCase()] : key;
+  // For MP3: translate known frame IDs to friendly names.
+  // For TXXX:desc frames not in the map, strip the TXXX: prefix so the field
+  // displays and round-trips cleanly (write will re-encode as TXXX on save).
+  let displayKey = key;
+  if (currentFormat === 'mp3') {
+    if (ID3_DISPLAY[key.toUpperCase()]) {
+      displayKey = ID3_DISPLAY[key.toUpperCase()];
+    } else if (key.toUpperCase().startsWith('TXXX:')) {
+      displayKey = key.slice(5); // strip "TXXX:" prefix
+    }
+  }
   // Display value: collapse newlines to spaces for the single-line input
   const displayVal = value.replace(/\r\n|\r|\n/g, ' ');
   tr.innerHTML = `
