@@ -1166,6 +1166,55 @@ function writeM4a(buffer, tags, ilstInfo, art) {
   ov.setUint32(meta.start, meta.size + diff, false);
   Logger.log('SAVE', `ilst: ${ilst.size}→${newIlstSize} (diff=${diff}), output: ${out.buffer.byteLength}B`);
   Logger.log('SAVE', `patched: moov=${moov.size+diff}, udta=${udta.size+diff}, meta=${meta.size+diff}`);
+
+  // Patch stco/co64 chunk offsets when moov precedes mdat (fast-start files).
+  // When moov size changes by diff, mdat position shifts by diff, so all chunk
+  // offsets that point into mdat must be adjusted by the same amount.
+  if (diff !== 0) {
+    // Find mdat position in output
+    let mdatOff = -1, scanOff = 0;
+    while (scanOff + 8 <= out.length) {
+      const sz = ov.getUint32(scanOff, false);
+      if (sz < 8 || scanOff + sz > out.length) break;
+      const tp = String.fromCharCode(out[scanOff+4], out[scanOff+5], out[scanOff+6], out[scanOff+7]);
+      if (tp === 'mdat') { mdatOff = scanOff; break; }
+      scanOff += sz;
+    }
+    if (mdatOff > moov.start) {
+      // moov is before mdat — walk moov subtree and adjust stco/co64
+      const newMoovEnd = moov.start + moov.size + diff;
+      (function patchOffsets(start, end) {
+        let off = start;
+        while (off + 8 <= end) {
+          const sz = ov.getUint32(off, false);
+          if (sz < 8 || off + sz > out.length) break;
+          const tp = String.fromCharCode(out[off+4], out[off+5], out[off+6], out[off+7]);
+          if (tp === 'stco') {
+            const count = ov.getUint32(off + 12, false);
+            for (let i = 0; i < count; i++) {
+              const entOff = off + 16 + i * 4;
+              ov.setUint32(entOff, ov.getUint32(entOff, false) + diff, false);
+            }
+            Logger.log('SAVE', `stco: updated ${count} chunk offset(s) by ${diff}`);
+          } else if (tp === 'co64') {
+            const count = ov.getUint32(off + 12, false);
+            for (let i = 0; i < count; i++) {
+              const entOff = off + 16 + i * 8;
+              const hi = ov.getUint32(entOff, false), lo = ov.getUint32(entOff+4, false);
+              const newVal = (BigInt(hi) << 32n | BigInt(lo >>> 0)) + BigInt(diff);
+              ov.setUint32(entOff, Number(newVal >> 32n), false);
+              ov.setUint32(entOff+4, Number(newVal & 0xFFFFFFFFn), false);
+            }
+            Logger.log('SAVE', `co64: updated ${count} chunk offset(s) by ${diff}`);
+          } else if ('moov trak mdia minf stbl edts dinf'.split(' ').includes(tp)) {
+            patchOffsets(off + 8, off + sz); // recurse into container atoms
+          }
+          off += sz;
+        }
+      })(moov.start, newMoovEnd);
+    }
+  }
+
   Logger.groupEnd('SAVE');
   return out.buffer;
 }
