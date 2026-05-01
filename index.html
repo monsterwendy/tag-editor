@@ -562,6 +562,19 @@ function buildPictureBlock(art) {
   Logger.log('ART', `buildPictureBlock: ${art.mimeType} ${art.width||0}×${art.height||0} ${art.bytes.length} bytes`);
   const enc = new TextEncoder();
   const mimeBytes = enc.encode(art.mimeType);
+
+  // Compute actual bits-per-pixel from image header rather than hardcoding 24.
+  // PNG IHDR: byte 24 = bit depth per channel, byte 25 = color type
+  // Color types: 0=gray(1ch), 2=RGB(3ch), 3=indexed(1ch), 4=gray+alpha(2ch), 6=RGBA(4ch)
+  // JPEG is always 24bpp (8bpc × 3 channels).
+  let bitDepth = 24;
+  if (art.mimeType === 'image/png' && art.bytes.length >= 26) {
+    const bd = art.bytes[24]; // bits per channel
+    const ct = art.bytes[25]; // color type
+    const chans = [1, 0, 3, 1, 2, 0, 4][ct] || 1;
+    bitDepth = bd * chans;
+  }
+
   const total = 4 + 4 + mimeBytes.length + 4 + 4 + 4 + 4 + 4 + 4 + art.bytes.length;
   const buf = new Uint8Array(total);
   const view = new DataView(buf.buffer);
@@ -572,8 +585,8 @@ function buildPictureBlock(art) {
   view.setUint32(off, 0, false); off += 4; // description length = 0
   view.setUint32(off, art.width || 0, false); off += 4;
   view.setUint32(off, art.height || 0, false); off += 4;
-  view.setUint32(off, 24, false); off += 4; // bit depth
-  view.setUint32(off, 0, false); off += 4; // indexed colors
+  view.setUint32(off, bitDepth, false); off += 4; // actual bits-per-pixel
+  view.setUint32(off, 0, false); off += 4; // indexed colors (0 for non-indexed)
   view.setUint32(off, art.bytes.length, false); off += 4;
   buf.set(art.bytes, off);
   return buf;
@@ -1044,7 +1057,10 @@ function parseM4a(buffer) {
  */
 function writeM4a(buffer, tags, ilstInfo, art) {
   Logger.group('SAVE', 'writeM4a');
-  if (!ilstInfo || !ilstInfo.ilst) { Logger.groupEnd('SAVE'); throw new Error('No ilst atom found in M4A'); }
+  if (!ilstInfo || !ilstInfo.ilst) {
+    Logger.groupEnd('SAVE');
+    throw new Error('This M4A has no metadata structure (missing moov/udta/meta/ilst atoms). Tags cannot be saved.');
+  }
   const { moov, udta, meta, ilst } = ilstInfo;
   Logger.log('SAVE', `input: ${buffer.byteLength}B, ${tags.length} tags, art=${art ? art.mimeType + ' ' + art.bytes.length + 'B' : 'none'}`);
   const enc = new TextEncoder();
@@ -1491,24 +1507,48 @@ function parseOggComments(buffer) {
     throw new Error('Not an OGG Vorbis or Opus file');
   }
 
-  // Find comment packet size using segment table (first packet in page 1)
-  const packetSizes = getPacketBoundaries(pages[1].segTable);
-  const commentPacketSize = packetSizes[0];
-  // Remaining data in page 1 after comment packet (e.g. Vorbis setup header)
-  const trailingData = page1data.slice(commentPacketSize);
-  Logger.log('OGG', `page1: commentPacket=${commentPacketSize}B, trailingData=${trailingData.length}B, packets=[${packetSizes.join(',')}]`);
+  // Collect the complete comment packet, which may span multiple OGG pages
+  // when the packet is large (e.g. embedded art >~35KB base64-encoded).
+  // A terminal segment value < 255 in the segment table signals end-of-packet;
+  // a value of 255 means the packet continues onto the next page.
+  let commentPacketData, trailingData;
+  const lastSeg1 = pages[1].segTable[pages[1].segTable.length - 1];
+  if (lastSeg1 < 255) {
+    // Packet fits entirely within page 1
+    const commentPacketSize = getPacketBoundaries(pages[1].segTable)[0];
+    commentPacketData = page1data.slice(0, commentPacketSize);
+    trailingData = page1data.slice(commentPacketSize); // setup header for Vorbis
+    Logger.log('OGG', `comment packet in page 1: ${commentPacketSize}B, trailing: ${trailingData.length}B`);
+  } else {
+    // Packet continues onto subsequent pages — collect all chunks until terminal segment
+    const chunks = [page1data];
+    let pi = 2;
+    while (pi < pages.length) {
+      chunks.push(pages[pi].pageData);
+      const lastSeg = pages[pi].segTable[pages[pi].segTable.length - 1];
+      if (lastSeg < 255) break; // terminal segment — packet ends here
+      pi++;
+    }
+    const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+    commentPacketData = new Uint8Array(totalLen);
+    let coff = 0;
+    for (const c of chunks) { commentPacketData.set(c, coff); coff += c.length; }
+    trailingData = new Uint8Array(0); // no room for trailing data when packet spans pages
+    Logger.log('OGG', `comment packet spans ${chunks.length} page(s): ${totalLen}B total`);
+  }
+  const commentPacketSize = commentPacketData.length;
 
-  // Parse Vorbis comments from the comment packet only
+  // Parse Vorbis comments from the complete comment packet
   let pos = commentOffset;
-  const dv = new DataView(page1data.buffer, page1data.byteOffset);
+  const dv = new DataView(commentPacketData.buffer, commentPacketData.byteOffset);
   const vendorLen = dv.getUint32(pos, true); pos += 4;
-  const vendorString = dec.decode(page1data.slice(pos, pos + vendorLen)); pos += vendorLen;
+  const vendorString = dec.decode(commentPacketData.slice(pos, pos + vendorLen)); pos += vendorLen;
   const count = dv.getUint32(pos, true); pos += 4;
   Logger.log('TAGS', `vendor: "${vendorString}", ${count} comments`);
   const tags = [];
   for (let i = 0; i < count; i++) {
     const clen = dv.getUint32(pos, true); pos += 4;
-    const comment = dec.decode(page1data.slice(pos, pos + clen)); pos += clen;
+    const comment = dec.decode(commentPacketData.slice(pos, pos + clen)); pos += clen;
     const eq = comment.indexOf('=');
     if (eq > 0) {
       const k = comment.slice(0, eq).toUpperCase();
@@ -2384,6 +2424,9 @@ function loadFile(file) {
         const result = parseM4a(currentBuffer);
         parsedMeta = result.ilstInfo;
         showTags(result.tags, 'M4A');
+        if (!result.ilstInfo || !result.ilstInfo.ilst) {
+          setStatus('warning: no metadata structure — tags cannot be saved', true);
+        }
       } else if (fmt === 'ogg') {
         currentFormat = 'ogg';
         parsedMeta = parseOggComments(currentBuffer);
