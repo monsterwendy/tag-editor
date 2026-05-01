@@ -1128,32 +1128,96 @@ function parseOggPages(buffer) {
  * @param {Uint8Array} pageData - The packet payload
  * @returns {Uint8Array} Complete serialized OGG page with valid CRC
  */
-function buildOggPage(headerType, granule, serial, pageSeq, pageData) {
-  // Build segment table: each 255-byte chunk is a "continuing" segment;
-  // the final segment (0-254 bytes) marks the packet boundary
-  const segments = [];
-  let remaining = pageData.length;
-  while (remaining >= 255) { segments.push(255); remaining -= 255; }
-  segments.push(remaining); // value < 255 signals end of packet
+/**
+ * Build a single OGG page from explicit segments and payload.
+ * Internal helper used by buildOggPage and buildOggPagesForPacket.
+ *
+ * @param {number} headerType - Page header type flags
+ * @param {bigint} granule    - Granule position (codec timestamp)
+ * @param {number} serial     - Stream serial number
+ * @param {number} pageSeq    - Page sequence number
+ * @param {number[]} segments - Segment table entries (each 0-255)
+ * @param {Uint8Array} payload - Page payload bytes
+ * @returns {Uint8Array} Complete serialized OGG page with CRC
+ */
+function buildOggPageRaw(headerType, granule, serial, pageSeq, segments, payload) {
   const numSeg = segments.length;
   const headerLen = 27 + numSeg;
-  const page = new Uint8Array(headerLen + pageData.length);
+  const page = new Uint8Array(headerLen + payload.length);
   const view = new DataView(page.buffer);
-  // Write "OggS" magic
-  page[0]=0x4F; page[1]=0x67; page[2]=0x67; page[3]=0x53;
-  page[4] = 0; // version (always 0)
-  page[5] = headerType;
+  page[0]=0x4F; page[1]=0x67; page[2]=0x67; page[3]=0x53; // "OggS"
+  page[4] = 0; page[5] = headerType;
   view.setBigInt64(6, granule, true);
   view.setUint32(14, serial, true);
   view.setUint32(18, pageSeq, true);
-  // CRC field (bytes 22-25) left as 0 for now — computed below
   page[26] = numSeg;
   for (let s = 0; s < numSeg; s++) page[27 + s] = segments[s];
-  page.set(pageData, headerLen);
-  // CRC must be computed with the CRC field itself set to zero
-  const crc = oggCrc32(page);
-  view.setUint32(22, crc, true);
+  page.set(payload, headerLen);
+  view.setUint32(22, oggCrc32(page), true);
   return page;
+}
+
+/**
+ * Build one or more OGG pages for a single packet, splitting across pages as needed.
+ *
+ * OGG pages hold at most 255 segments × 255 bytes = 65,025 bytes of packet data.
+ * Large packets (e.g. METADATA_BLOCK_PICTURE for big images) must span multiple pages.
+ * The first page uses firstHeaderType; continuation pages add the 0x01 flag.
+ * Granule is -1n on non-final pages (indicating no timestamp boundary within the packet).
+ * Spec: https://www.rfc-editor.org/rfc/rfc9639.html  (OGG framing also used for Vorbis/Opus)
+ *
+ * @param {number} firstHeaderType - Header type for the first page (e.g. 0 for comment page)
+ * @param {bigint} granule         - Granule for the final page; -1n on intermediate pages
+ * @param {number} serial          - Stream serial number
+ * @param {number} startSeq        - Page sequence number for the first page
+ * @param {Uint8Array} packet      - Complete packet data to encode
+ * @returns {Uint8Array[]} Array of OGG pages (usually one, multiple for large packets)
+ */
+function buildOggPagesForPacket(firstHeaderType, granule, serial, startSeq, packet) {
+  const MAX_SEGS = 255; // OGG page segment table is limited to 255 entries
+  const pages = [];
+  let offset = 0;
+  let seq = startSeq;
+
+  do {
+    const remaining = packet.length - offset;
+    const segs = [];
+    let r = remaining;
+    // Fill segment table: push 255 for each full 255-byte chunk
+    while (r >= 255 && segs.length < MAX_SEGS) { segs.push(255); r -= 255; }
+    // If segment table has room, add terminal segment (< 255 = end of packet)
+    if (segs.length < MAX_SEGS) segs.push(r);
+    // else: table is full (255 segs), last entry is 255 → packet continues on next page
+
+    const isFinal = segs[segs.length - 1] < 255; // terminal segment ends the packet
+    const chunkSize = segs.reduce((a, b) => a + b, 0);
+    const isFirst = offset === 0;
+    // Continuation flag: set on all non-first pages of a split packet
+    const ht = isFirst ? firstHeaderType : (firstHeaderType | 0x01);
+    // Granule is only meaningful on the page where the packet ends
+    const gran = isFinal ? granule : -1n;
+
+    pages.push(buildOggPageRaw(ht, gran, serial, seq, segs, packet.slice(offset, offset + chunkSize)));
+    seq++;
+    offset += chunkSize;
+  } while (offset < packet.length);
+
+  return pages;
+}
+
+/**
+ * Build a single OGG page for a packet that fits in one page (≤65,024 bytes).
+ * For large packets use buildOggPagesForPacket instead.
+ *
+ * @param {number} headerType - Page header type flags
+ * @param {bigint} granule    - Granule position (codec timestamp)
+ * @param {number} serial     - Stream serial number
+ * @param {number} pageSeq    - Page sequence number
+ * @param {Uint8Array} pageData - Packet payload
+ * @returns {Uint8Array} Complete serialized OGG page with CRC
+ */
+function buildOggPage(headerType, granule, serial, pageSeq, pageData) {
+  return buildOggPagesForPacket(headerType, granule, serial, pageSeq, pageData)[0];
 }
 
 /**
@@ -1322,43 +1386,73 @@ function writeOggComments(buffer, tags, meta) {
   }
   if (!isOpus) packet[pos] = 1; // framing bit
 
-  // Build page 1 with comment packet + any trailing packets (e.g. Vorbis setup header)
-  let newPage1;
+  // Build new comment page(s). Large packets (e.g. huge METADATA_BLOCK_PICTURE) may
+  // span multiple OGG pages — buildOggPagesForPacket handles this automatically.
+  const commentPages = buildOggPagesForPacket(
+    pages[1].headerType & ~0x01, // clear continuation bit; first comment page is not a continuation
+    pages[1].granule,
+    serial,
+    pages[1].pageSeq,
+    packet
+  );
+
+  // For Vorbis (not Opus), page 1 may also contain a trailing setup header packet.
+  // When the comment packet is small, both fit on one page (multiPacket).
+  // For large comment packets we put the setup header on its own page after the comment pages.
+  let setupPages = [];
   if (trailingData && trailingData.length > 0) {
-    newPage1 = buildOggPageMultiPacket(
-      pages[1].headerType,
-      pages[1].granule,
-      serial,
-      pages[1].pageSeq,
-      [packet, trailingData]
-    );
-  } else {
-    newPage1 = buildOggPage(
-      pages[1].headerType,
-      pages[1].granule,
-      serial,
-      pages[1].pageSeq,
-      packet
-    );
+    if (commentPages.length === 1) {
+      // Comment fits on one page — keep both packets on same page (original behavior)
+      commentPages[0] = buildOggPageMultiPacket(
+        pages[1].headerType,
+        pages[1].granule,
+        serial,
+        pages[1].pageSeq,
+        [packet, trailingData]
+      );
+    } else {
+      // Comment spans multiple pages — put setup on its own page after them
+      const setupSeq = pages[1].pageSeq + commentPages.length;
+      setupPages = buildOggPagesForPacket(0, 0n, serial, setupSeq, trailingData);
+    }
   }
+
+  // Total new pages replacing original page 1: commentPages + setupPages
+  const newPages = [...commentPages, ...setupPages];
+  // Page sequence delta: how many extra pages we're inserting relative to the original 1 page
+  const seqDelta = newPages.length - 1;
 
   // Rebuild page 0 from raw bytes
   const page0Raw = new Uint8Array(buffer, pages[0].pageStart, pages[0].headerLen + pages[0].dataSize);
 
-  // Calculate total size
-  let totalSize = page0Raw.length + newPage1.length;
+  // Pre-build all new page bytes
+  const newPageBytes = newPages; // already Uint8Array[]
+
+  // Calculate total output size
+  let totalSize = page0Raw.length;
+  for (const p of newPageBytes) totalSize += p.length;
   for (let i = 2; i < pages.length; i++) totalSize += pages[i].headerLen + pages[i].dataSize;
 
   const out = new Uint8Array(totalSize);
   let outPos = 0;
   out.set(page0Raw, outPos); outPos += page0Raw.length;
-  out.set(newPage1, outPos); outPos += newPage1.length;
+  for (const p of newPageBytes) { out.set(p, outPos); outPos += p.length; }
 
-  // Copy remaining pages from original buffer
+  // Copy remaining pages from original buffer, patching their sequence numbers if needed
   for (let i = 2; i < pages.length; i++) {
     const p = pages[i];
-    out.set(new Uint8Array(buffer, p.pageStart, p.headerLen + p.dataSize), outPos);
-    outPos += p.headerLen + p.dataSize;
+    const rawPage = new Uint8Array(buffer, p.pageStart, p.headerLen + p.dataSize);
+    const pageStart = outPos;
+    out.set(rawPage, outPos); outPos += rawPage.length;
+    if (seqDelta !== 0) {
+      // Patch the page sequence number at offset +18 within the page (uint32le)
+      const view = new DataView(out.buffer, pageStart, rawPage.length);
+      const oldSeq = view.getUint32(18, true);
+      view.setUint32(18, oldSeq + seqDelta, true);
+      // Recompute CRC after patching (CRC field at offset +22)
+      view.setUint32(22, 0, true); // zero CRC before computing
+      view.setUint32(22, oggCrc32(new Uint8Array(out.buffer, pageStart, rawPage.length)), true);
+    }
   }
 
   return out.buffer;
