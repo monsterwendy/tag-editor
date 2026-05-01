@@ -130,6 +130,45 @@
     font-family: monospace; transition: all 0.1s;
   }
   .var-chip:hover { border-color: #4a8fd4; color: #4a8fd4; background: #0d1a2a; }
+  #art-section {
+    display: none;
+    flex-direction: row;
+    align-items: center;
+    height: 64px;
+    margin-bottom: 8px;
+    border: 1px solid #1d1d1d;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #art-thumb-box {
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    background: #0c0c0c;
+    border-right: 1px solid #1d1d1d;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    color: #2a2a2a;
+    font-size: 9px;
+    text-align: center;
+    line-height: 1.4;
+    white-space: pre-line;
+    font-family: monospace;
+    box-sizing: border-box;
+    padding: 4px;
+  }
+  #art-thumb-box img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  #art-info-box {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    padding: 0 14px;
+  }
+  #art-meta { font-size: 11px; color: #555; letter-spacing: 1px; font-family: monospace; text-transform: uppercase; }
 </style>
 </head>
 <body>
@@ -154,6 +193,14 @@
 <div id="tag-section">
   <div id="file-info"></div>
   <div id="audio-info"></div>
+  <div id="art-section">
+    <div id="art-thumb-box"></div>
+    <div id="art-info-box">
+      <div id="art-meta"></div>
+      <button class="btn" id="art-btn" onclick="document.getElementById('art-file-input').click()">Add Image</button>
+    </div>
+  </div>
+  <input type="file" id="art-file-input" accept="image/*" style="display:none">
   <table>
     <thead>
       <tr>
@@ -200,6 +247,8 @@ let currentBuffer = null;
 let currentFormat = null;
 /** @type {Object|null} Format-specific parsed metadata used by the corresponding write function */
 let parsedMeta = null;
+/** @type {{mimeType: string, bytes: Uint8Array, width: number, height: number}|null} Current album art */
+let currentArt = null;
 
 // =====================
 // FLAC Vorbis Comments
@@ -349,6 +398,312 @@ function writeFlac(buffer, tags, meta) {
   // Append everything after the old comment block
   out.set(new Uint8Array(buffer, blockOffset + oldTotal), pos);
   return out.buffer;
+}
+
+// =====================
+// Album Art — PICTURE blocks, APIC frames, covr atoms
+// =====================
+
+/**
+ * Parse a FLAC PICTURE block (also used by OGG METADATA_BLOCK_PICTURE).
+ * Format (all big-endian): uint32 picType, uint32 mimeLen, mime, uint32 descLen,
+ * desc, uint32 width, uint32 height, uint32 depth, uint32 colors, uint32 dataLen, imageData.
+ *
+ * @param {Uint8Array} data - Raw PICTURE block bytes (no FLAC metadata block header)
+ * @returns {{mimeType: string, bytes: Uint8Array, width: number, height: number}}
+ */
+function parsePictureBlock(data) {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  let off = 4; // skip picType
+  const mimeLen = view.getUint32(off, false); off += 4;
+  const mimeType = new TextDecoder().decode(data.slice(off, off + mimeLen)); off += mimeLen;
+  const descLen = view.getUint32(off, false); off += 4;
+  off += descLen; // skip description
+  const width = view.getUint32(off, false); off += 4;
+  const height = view.getUint32(off, false); off += 4;
+  off += 8; // skip bit depth + colors
+  const dataLen = view.getUint32(off, false); off += 4;
+  const bytes = data.slice(off, off + dataLen);
+  return { mimeType, bytes, width, height };
+}
+
+/**
+ * Build a FLAC PICTURE block for front cover art (picType=3).
+ * Returns raw block data bytes (no FLAC metadata block header).
+ *
+ * @param {{mimeType: string, bytes: Uint8Array, width: number, height: number}} art
+ * @returns {Uint8Array}
+ */
+function buildPictureBlock(art) {
+  const enc = new TextEncoder();
+  const mimeBytes = enc.encode(art.mimeType);
+  const total = 4 + 4 + mimeBytes.length + 4 + 4 + 4 + 4 + 4 + 4 + art.bytes.length;
+  const buf = new Uint8Array(total);
+  const view = new DataView(buf.buffer);
+  let off = 0;
+  view.setUint32(off, 3, false); off += 4; // picType: front cover
+  view.setUint32(off, mimeBytes.length, false); off += 4;
+  buf.set(mimeBytes, off); off += mimeBytes.length;
+  view.setUint32(off, 0, false); off += 4; // description length = 0
+  view.setUint32(off, art.width || 0, false); off += 4;
+  view.setUint32(off, art.height || 0, false); off += 4;
+  view.setUint32(off, 24, false); off += 4; // bit depth
+  view.setUint32(off, 0, false); off += 4; // indexed colors
+  view.setUint32(off, art.bytes.length, false); off += 4;
+  buf.set(art.bytes, off);
+  return buf;
+}
+
+/**
+ * Build an ID3v2 APIC frame payload (no 10-byte frame header).
+ * Layout: encoding(0x00) + mime(null-term) + picType(0x03) + desc(0x00) + imageData.
+ *
+ * @param {{mimeType: string, bytes: Uint8Array}} art
+ * @returns {Uint8Array}
+ */
+function buildApicFrame(art) {
+  const mimeBytes = new TextEncoder().encode(art.mimeType);
+  const total = 1 + mimeBytes.length + 1 + 1 + 1 + art.bytes.length;
+  const buf = new Uint8Array(total);
+  let off = 0;
+  buf[off++] = 0; // encoding: Latin-1
+  buf.set(mimeBytes, off); off += mimeBytes.length;
+  buf[off++] = 0; // null terminator for mime
+  buf[off++] = 3; // picture type: front cover
+  buf[off++] = 0; // empty description (null terminator)
+  buf.set(art.bytes, off);
+  return buf;
+}
+
+/**
+ * Build a complete M4A 'covr' atom for album art.
+ * Inner 'data' atom type indicator: 14 for PNG, 13 for JPEG.
+ *
+ * @param {{mimeType: string, bytes: Uint8Array}} art
+ * @returns {Uint8Array}
+ */
+function buildCovrAtom(art) {
+  const ti = art.mimeType === 'image/png' ? 14 : 13;
+  const dataAtomSize = 8 + 4 + 4 + art.bytes.length;
+  const covrSize = 8 + dataAtomSize;
+  const buf = new Uint8Array(covrSize);
+  const view = new DataView(buf.buffer);
+  const enc = new TextEncoder();
+  view.setUint32(0, covrSize, false);
+  buf.set(enc.encode('covr'), 4);
+  view.setUint32(8, dataAtomSize, false);
+  buf.set(enc.encode('data'), 12);
+  view.setUint32(16, ti, false); // type indicator
+  // bytes 20-23 (locale) default to 0
+  buf.set(art.bytes, 24);
+  return buf;
+}
+
+/**
+ * Write FLAC file with updated tags AND album art.
+ * First updates VORBIS_COMMENT via writeFlac, then handles the PICTURE block
+ * (type 6): removes existing PICTURE blocks and optionally inserts a new one.
+ *
+ * @param {ArrayBuffer} buffer - Original FLAC file bytes
+ * @param {[string, string][]} tags - Tag pairs
+ * @param {Object} meta - Metadata from parseFlac
+ * @param {{mimeType: string, bytes: Uint8Array, width: number, height: number}|null} art
+ * @returns {ArrayBuffer}
+ */
+function writeFlacWithArt(buffer, tags, meta, art) {
+  // First update tags
+  const result = writeFlac(buffer, tags, meta);
+  const bytes = new Uint8Array(result);
+
+  // Collect all metadata blocks
+  const magic = bytes.slice(0, 4); // fLaC
+  const blocks = [];
+  let off = 4;
+  while (off + 4 <= bytes.length) {
+    const bh = bytes[off];
+    const isLast = !!(bh & 0x80);
+    const btype = bh & 0x7F;
+    const blen = (bytes[off+1] << 16) | (bytes[off+2] << 8) | bytes[off+3];
+    blocks.push({ type: btype, data: bytes.slice(off + 4, off + 4 + blen) });
+    off += 4 + blen;
+    if (isLast) break;
+  }
+  const audioData = bytes.slice(off);
+
+  // Remove existing PICTURE blocks (type 6)
+  const filtered = blocks.filter(b => b.type !== 6);
+
+  // Add new PICTURE block after STREAMINFO (index 1) if art present
+  if (art) {
+    const picData = buildPictureBlock(art);
+    filtered.splice(1, 0, { type: 6, data: picData });
+  }
+
+  // Reassemble: fix isLast flags
+  let totalSize = 4; // magic
+  for (const b of filtered) totalSize += 4 + b.data.length;
+  totalSize += audioData.length;
+
+  const out = new Uint8Array(totalSize);
+  out.set(magic, 0);
+  let pos = 4;
+  for (let i = 0; i < filtered.length; i++) {
+    const b = filtered[i];
+    const isLast = (i === filtered.length - 1);
+    out[pos] = (isLast ? 0x80 : 0) | b.type;
+    const dlen = b.data.length;
+    out[pos+1] = (dlen >> 16) & 0xFF;
+    out[pos+2] = (dlen >> 8) & 0xFF;
+    out[pos+3] = dlen & 0xFF;
+    out.set(b.data, pos + 4);
+    pos += 4 + dlen;
+  }
+  out.set(audioData, pos);
+  return out.buffer;
+}
+
+/**
+ * Extract album art from the currently loaded file.
+ * Sets the global currentArt variable based on format-specific art storage:
+ * - MP3: APIC frame in rawFrames
+ * - FLAC: PICTURE metadata block (type 6)
+ * - M4A: covr atom in ilst
+ * - OGG/Opus: METADATA_BLOCK_PICTURE Vorbis comment (base64-encoded PICTURE block)
+ */
+function extractArt() {
+  currentArt = null;
+  try {
+    const buffer = currentBuffer;
+    const bytes = new Uint8Array(buffer);
+    const view = new DataView(buffer);
+
+    if (currentFormat === 'mp3') {
+      const apic = parsedMeta.rawFrames.find(f => f.id === 'APIC');
+      if (apic) {
+        const d = apic.data;
+        const enc = d[0]; // encoding byte
+        let i = 1;
+        while (i < d.length && d[i] !== 0) i++; // read mime string
+        const mime = new TextDecoder().decode(d.slice(1, i));
+        i++; // skip null
+        i++; // skip picture type byte
+        // Skip description (null-terminated, encoding-dependent)
+        if (enc === 1 || enc === 2) {
+          while (i + 1 < d.length && !(d[i] === 0 && d[i+1] === 0)) i += 2;
+          i += 2; // skip double-null
+        } else {
+          while (i < d.length && d[i] !== 0) i++;
+          i++; // skip null
+        }
+        currentArt = { mimeType: mime, bytes: d.slice(i), width: 0, height: 0 };
+      }
+
+    } else if (currentFormat === 'flac') {
+      let off = 4; // skip fLaC magic
+      while (off + 4 <= buffer.byteLength) {
+        const bh = bytes[off];
+        const isLast = !!(bh & 0x80);
+        const btype = bh & 0x7F;
+        const blen = (bytes[off+1] << 16) | (bytes[off+2] << 8) | bytes[off+3];
+        if (btype === 6) {
+          currentArt = parsePictureBlock(new Uint8Array(buffer, off + 4, blen));
+          break;
+        }
+        off += 4 + blen;
+        if (isLast) break;
+      }
+
+    } else if (currentFormat === 'm4a') {
+      const { ilst } = parsedMeta;
+      if (ilst) {
+        let off = ilst.data;
+        while (off + 8 <= ilst.start + ilst.size) {
+          const sz = view.getUint32(off, false);
+          if (sz < 8) break;
+          const tp = String.fromCharCode(bytes[off+4], bytes[off+5], bytes[off+6], bytes[off+7]);
+          if (tp === 'covr') {
+            // Find data sub-atom inside covr
+            const dOff = off + 8;
+            const dEnd = off + sz;
+            if (dOff + 16 <= dEnd) {
+              const dSz = view.getUint32(dOff, false);
+              const dTp = String.fromCharCode(bytes[dOff+4], bytes[dOff+5], bytes[dOff+6], bytes[dOff+7]);
+              if (dTp === 'data' && dSz >= 16) {
+                const ti = view.getUint32(dOff + 8, false);
+                const mime = ti === 14 ? 'image/png' : 'image/jpeg';
+                const imgStart = dOff + 16; // after data header + type + locale
+                const imgLen = dSz - 16;
+                currentArt = { mimeType: mime, bytes: new Uint8Array(buffer, imgStart, imgLen).slice(), width: 0, height: 0 };
+              }
+            }
+            break;
+          }
+          off += sz;
+        }
+      }
+
+    } else if (currentFormat === 'ogg' || currentFormat === 'opus') {
+      const mbp = parsedMeta.tags.find(([k]) => k === 'METADATA_BLOCK_PICTURE');
+      if (mbp) {
+        const b64 = mbp[1];
+        const binary = atob(b64);
+        const decoded = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) decoded[i] = binary.charCodeAt(i);
+        currentArt = parsePictureBlock(decoded);
+      }
+    }
+  } catch(e) {
+    console.warn('art extract failed:', e);
+  }
+  renderArtPanel();
+}
+
+/**
+ * Update the album art panel UI based on currentArt state.
+ * Shows thumbnail + format/dimensions/size when art exists,
+ * or empty state with "Add Image" button when no art.
+ */
+function renderArtPanel() {
+  const artSection = document.getElementById('art-section');
+  const thumbBox = document.getElementById('art-thumb-box');
+  const artMeta = document.getElementById('art-meta');
+  const artBtn = document.getElementById('art-btn');
+
+  artSection.style.display = 'flex';
+  thumbBox.innerHTML = '';
+
+  if (currentArt) {
+    const blob = new Blob([currentArt.bytes], { type: currentArt.mimeType });
+    const url = URL.createObjectURL(blob);
+    const img = document.createElement('img');
+    img.src = url;
+    thumbBox.appendChild(img);
+
+    const fmt = currentArt.mimeType.split('/')[1].toUpperCase();
+    const sizeBytes = currentArt.bytes.length;
+    const sizeStr = sizeBytes >= 1048576
+      ? (sizeBytes / 1048576).toFixed(1) + 'MB'
+      : Math.round(sizeBytes / 1024) + 'KB';
+
+    img.onload = () => {
+      currentArt.width = img.naturalWidth;
+      currentArt.height = img.naturalHeight;
+      artMeta.textContent = `${fmt}   ${img.naturalWidth} \u00d7 ${img.naturalHeight}   ${sizeStr}`;
+    };
+    // Fallback if img loads instantly from cache
+    if (img.complete && img.naturalWidth) {
+      currentArt.width = img.naturalWidth;
+      currentArt.height = img.naturalHeight;
+      artMeta.textContent = `${fmt}   ${img.naturalWidth} \u00d7 ${img.naturalHeight}   ${sizeStr}`;
+    } else {
+      artMeta.textContent = `${fmt}   ${sizeStr}`;
+    }
+    artBtn.textContent = 'Replace';
+  } else {
+    thumbBox.textContent = 'No Album\nArt Image';
+    artMeta.textContent = '';
+    artBtn.textContent = 'Add Image';
+  }
 }
 
 // ==========
@@ -528,7 +883,7 @@ function parseM4a(buffer) {
  * @param {Object} ilstInfo - Positional metadata from parseM4a
  * @returns {ArrayBuffer} Complete new M4A file with updated tags
  */
-function writeM4a(buffer, tags, ilstInfo) {
+function writeM4a(buffer, tags, ilstInfo, art) {
   if (!ilstInfo || !ilstInfo.ilst) throw new Error('No ilst atom found in M4A');
   const { moov, udta, meta, ilst } = ilstInfo;
   const enc = new TextEncoder();
@@ -620,6 +975,9 @@ function writeM4a(buffer, tags, ilstInfo) {
     child.set(content, 24);                   // actual tag value
     atoms.push(child);
   }
+
+  // Add album art as covr atom if provided
+  if (art) atoms.push(buildCovrAtom(art));
 
   // Rebuild the ilst atom and splice it into the file
   const newIlstContent = atoms.reduce((sum, a) => sum + a.length, 0);
@@ -1287,6 +1645,26 @@ dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.
 fileInput.addEventListener('change', e => loadFile(e.target.files[0]));
 
 /**
+ * Handle album art file selection — read the image and update currentArt.
+ * @param {File} file - Image file from file input
+ */
+function setArt(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    currentArt = {
+      mimeType: file.type || 'image/jpeg',
+      bytes: new Uint8Array(e.target.result),
+      width: 0,
+      height: 0
+    };
+    renderArtPanel();
+  };
+  reader.readAsArrayBuffer(file);
+}
+document.getElementById('art-file-input').addEventListener('change', e => { setArt(e.target.files[0]); e.target.value = ''; });
+
+/**
  * Load an audio file, detect its format, parse tags, and display them.
  *
  * Reads the file into an ArrayBuffer via FileReader, runs format detection,
@@ -1326,6 +1704,7 @@ function loadFile(file) {
       } else {
         setStatus('unsupported format', true);
       }
+      if (currentFormat) extractArt();
     } catch (err) {
       setStatus('parse error: ' + err.message, true);
       console.error(err);
@@ -1576,7 +1955,11 @@ function showTags(tags, format) {
   fileInfo.innerHTML = `<strong>${esc(currentFile.name)}</strong>${badge}<span class="file-size">${sizeMB}&nbsp;MB</span>`;
   try { showAudioInfo(parseAudioInfo(currentBuffer, currentFormat)); } catch(e) { document.getElementById('audio-info').innerHTML = ''; }
   tagBody.innerHTML = '';
-  for (const [k, v] of tags) addRow(k, v);
+  // Filter out binary art tags from display (handled by art panel)
+  const displayTags = (format === 'OGG' || format === 'OPUS')
+    ? tags.filter(([k]) => k !== 'METADATA_BLOCK_PICTURE')
+    : tags;
+  for (const [k, v] of displayTags) addRow(k, v);
   updateFieldPicker();
   setupFilenameSection(currentFile.name);
   tagSection.style.display = 'block';
@@ -1661,18 +2044,27 @@ function saveFile() {
     const tags = getTags();
     let out, mime;
     if (currentFormat === 'flac') {
-      out = writeFlac(currentBuffer, tags, parsedMeta);
+      out = writeFlacWithArt(currentBuffer, tags, parsedMeta, currentArt);
       mime = 'audio/flac';
     } else if (currentFormat === 'm4a') {
-      out = writeM4a(currentBuffer, tags, parsedMeta);
+      out = writeM4a(currentBuffer, tags, parsedMeta, currentArt);
       mime = 'audio/mp4';
-    } else if (currentFormat === 'ogg') {
-      out = writeOggComments(currentBuffer, tags, parsedMeta);
-      mime = 'audio/ogg';
-    } else if (currentFormat === 'opus') {
-      out = writeOggComments(currentBuffer, tags, parsedMeta);
-      mime = 'audio/opus';
+    } else if (currentFormat === 'ogg' || currentFormat === 'opus') {
+      // Inject art as METADATA_BLOCK_PICTURE Vorbis comment
+      let artTags = tags.filter(([k]) => k !== 'METADATA_BLOCK_PICTURE');
+      if (currentArt) {
+        const pb = buildPictureBlock(currentArt);
+        const b64 = btoa(Array.from(pb).map(b => String.fromCharCode(b)).join(''));
+        artTags.push(['METADATA_BLOCK_PICTURE', b64]);
+      }
+      out = writeOggComments(currentBuffer, artTags, parsedMeta);
+      mime = currentFormat === 'ogg' ? 'audio/ogg' : 'audio/opus';
     } else {
+      // MP3 — inject APIC frame
+      parsedMeta.rawFrames = parsedMeta.rawFrames.filter(f => f.id !== 'APIC');
+      if (currentArt) {
+        parsedMeta.rawFrames.push({ id: 'APIC', data: buildApicFrame(currentArt) });
+      }
       const audio = currentBuffer.slice(parsedMeta.headerSize);
       out = writeId3(audio, tags, parsedMeta.rawFrames);
       mime = 'audio/mpeg';
