@@ -403,6 +403,23 @@ function writeFlac(buffer, tags, meta) {
 // =====================
 // Album Art — PICTURE blocks, APIC frames, covr atoms
 // =====================
+//
+// PICTURE block (FLAC type 6 / OGG METADATA_BLOCK_PICTURE):
+//   Spec: RFC 9639 §8.8 — https://www.rfc-editor.org/rfc/rfc9639.html#name-picture
+//   OGG usage: base64-encode the binary block, store as Vorbis comment key METADATA_BLOCK_PICTURE
+//   OGG spec: https://wiki.xiph.org/VorbisComment (§"METADATA_BLOCK_PICTURE")
+//   Base64 encoding: RFC 4648 §4 — no line feeds, padding required
+//
+// APIC frame (ID3v2):
+//   Spec: https://id3.org/id3v2.3.0 §4.15 (v2.3) / https://id3.org/id3v2.4.0-frames
+//   FFmpeg reference impl: https://ffmpeg.org/doxygen/3.3/id3v2enc_8c_source.html (ff_id3v2_write_apic)
+//   DeaDBeeF reference: https://github.com/DeaDBeeF-Player/deadbeef/tree/master/plugins/artwork
+//
+// covr atom (M4A):
+//   No official spec; de facto standard via iTunes/QuickTime
+//   AtomicParsley reference impl: https://github.com/wez/atomicparsley
+//   Path: moov → udta → meta → ilst → covr → data
+//   data atom type indicator: 13 = JPEG, 14 = PNG
 
 /**
  * Parse a FLAC PICTURE block (also used by OGG METADATA_BLOCK_PICTURE).
@@ -2050,7 +2067,8 @@ function saveFile() {
       out = writeM4a(currentBuffer, tags, parsedMeta, currentArt);
       mime = 'audio/mp4';
     } else if (currentFormat === 'ogg' || currentFormat === 'opus') {
-      // Inject art as METADATA_BLOCK_PICTURE Vorbis comment
+      // Inject art as METADATA_BLOCK_PICTURE Vorbis comment (base64-encoded PICTURE block)
+      // Spec: https://wiki.xiph.org/VorbisComment — RFC 4648 §4 base64, no line breaks, padding required
       let artTags = tags.filter(([k]) => k !== 'METADATA_BLOCK_PICTURE');
       if (currentArt) {
         const pb = buildPictureBlock(currentArt);
