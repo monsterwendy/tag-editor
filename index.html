@@ -552,6 +552,22 @@ function parsePictureBlock(data) {
 }
 
 /**
+ * Decode the picture type from a base64-encoded METADATA_BLOCK_PICTURE value.
+ * Returns the picType (0-20) or -1 if the data is invalid.
+ * Used to distinguish front cover (type 3) from other picture types.
+ *
+ * @param {string} b64 - Base64-encoded PICTURE block (from Vorbis comment value)
+ * @returns {number} Picture type integer, or -1 on error
+ */
+function getOggPicBlockType(b64) {
+  try {
+    const bin = atob(b64);
+    if (bin.length < 4) return -1;
+    return (bin.charCodeAt(0) << 24) | (bin.charCodeAt(1) << 16) | (bin.charCodeAt(2) << 8) | bin.charCodeAt(3);
+  } catch { return -1; }
+}
+
+/**
  * Build a FLAC PICTURE block for front cover art (picType=3).
  * Returns raw block data bytes (no FLAC metadata block header).
  *
@@ -2493,8 +2509,9 @@ function parseAudioInfo(buffer, format) {
         const b13 = bytes[d+13];
         info.bitDepth = (((b12 & 0x01) << 4) | (b13 >> 4)) + 1;
         // bits 108-143: total samples (36 bits)
+        // >>> 0 forces unsigned 32-bit — without it, bytes[d+14] >= 0x80 makes << 24 negative
         const totalSamples = ((b13 & 0x0F) * 4294967296) +
-          ((bytes[d+14] << 24) | (bytes[d+15] << 16) | (bytes[d+16] << 8) | bytes[d+17]);
+          (((bytes[d+14] << 24) | (bytes[d+15] << 16) | (bytes[d+16] << 8) | bytes[d+17]) >>> 0);
         info.duration = info.sampleRate ? totalSamples / info.sampleRate : 0;
         // Bitrate from file size
         if (info.duration > 0) info.bitrate = Math.round((buffer.byteLength * 8) / info.duration / 1000);
@@ -2521,6 +2538,40 @@ function parseAudioInfo(buffer, format) {
           info.channels = channelMode === 3 ? 1 : 2;
           info.bitDepth = 16; // MP3 is always decoded to 16-bit PCM
           if (info.bitrate > 0) info.duration = (buffer.byteLength - startOff) * 8 / (info.bitrate * 1000);
+          // Check for Xing/Info VBR header for accurate duration
+          // Xing is at frame_start + 4 (skip header) + side_info_len
+          const mpegVer = (bytes[i+1] >> 3) & 0x3; // 3=MPEG1, 2=MPEG2, 0=MPEG2.5
+          const isMono = (channelMode === 3);
+          const sideInfoLen = (mpegVer === 3) ? (isMono ? 17 : 32) : (isMono ? 9 : 17);
+          const xingOff = i + 4 + sideInfoLen;
+          let vbrDetected = false;
+          if (xingOff + 12 <= buffer.byteLength) {
+            const xTag = String.fromCharCode(bytes[xingOff], bytes[xingOff+1], bytes[xingOff+2], bytes[xingOff+3]);
+            if (xTag === 'Xing' || xTag === 'Info') {
+              const xFlags = view.getUint32(xingOff + 4, false);
+              if (xFlags & 0x1) {
+                const frameCount = view.getUint32(xingOff + 8, false);
+                if (frameCount > 0 && info.sampleRate > 0) {
+                  const samplesPerFrame = mpegVer === 3 ? 1152 : 576;
+                  info.duration = (frameCount * samplesPerFrame) / info.sampleRate;
+                  info.bitrate = Math.round((buffer.byteLength - startOff) * 8 / info.duration / 1000);
+                  vbrDetected = true;
+                }
+              }
+            }
+          }
+          // VBRI header (Fraunhofer format) — fixed at frame_start + 36
+          if (!vbrDetected && i + 50 <= buffer.byteLength) {
+            const vTag = String.fromCharCode(bytes[i+36], bytes[i+37], bytes[i+38], bytes[i+39]);
+            if (vTag === 'VBRI') {
+              const vFrames = view.getUint32(i + 50, false); // bytes: +42, frames: +46 within VBRI header (+36 base)
+              if (vFrames > 0 && info.sampleRate > 0) {
+                const samplesPerFrame = mpegVer === 3 ? 1152 : 576;
+                info.duration = (vFrames * samplesPerFrame) / info.sampleRate;
+                info.bitrate = Math.round((buffer.byteLength - startOff) * 8 / info.duration / 1000);
+              }
+            }
+          }
           break;
         }
       }
@@ -2609,7 +2660,9 @@ function parseAudioInfo(buffer, format) {
       const mvhd = findAtom(moov.off + 8, moov.off + moov.size, 'mvhd');
       if (mvhd) {
         const v = bytes[mvhd.off + 8]; // version
-        const tsOff = mvhd.off + 8 + (v === 1 ? 28 : 12);
+        // v0: version(1)+flags(3)+creation(4)+modification(4) = 12 bytes before timescale
+        // v1: version(1)+flags(3)+creation(8)+modification(8) = 20 bytes before timescale
+        const tsOff = mvhd.off + 8 + (v === 1 ? 20 : 12);
         const durOff = tsOff + 4;
         const timescale = view.getUint32(tsOff);
         const duration = v === 1 ? Number(view.getBigUint64(durOff)) : view.getUint32(durOff);
@@ -2809,7 +2862,14 @@ function saveFile() {
     } else if (currentFormat === 'ogg' || currentFormat === 'opus') {
       // Inject art as METADATA_BLOCK_PICTURE Vorbis comment (base64-encoded PICTURE block)
       // Spec: https://wiki.xiph.org/VorbisComment — RFC 4648 §4 base64, no line breaks, padding required
+      // Preserve non-type-3 PICTURE blocks (back cover, artist, etc.); replace/inject type-3 (front cover)
       let artTags = tags.filter(([k]) => k !== 'METADATA_BLOCK_PICTURE');
+      // Re-add any non-front-cover PICTURE blocks from the original file
+      for (const [k, v] of parsedMeta.tags) {
+        if (k === 'METADATA_BLOCK_PICTURE' && getOggPicBlockType(v) !== 3) {
+          artTags.push([k, v]);
+        }
+      }
       if (currentArt) {
         const pb = buildPictureBlock(currentArt);
         const b64 = btoa(Array.from(pb).map(b => String.fromCharCode(b)).join(''));
@@ -2818,13 +2878,13 @@ function saveFile() {
       out = writeOggComments(currentBuffer, artTags, parsedMeta);
       mime = currentFormat === 'ogg' ? 'audio/ogg' : 'audio/opus';
     } else {
-      // MP3 — inject APIC frame
-      parsedMeta.rawFrames = parsedMeta.rawFrames.filter(f => f.id !== 'APIC');
+      // MP3 — inject APIC frame (use local copy to avoid mutating parsedMeta for multi-save)
+      let localRawFrames = parsedMeta.rawFrames.filter(f => f.id !== 'APIC');
       if (currentArt) {
-        parsedMeta.rawFrames.push({ id: 'APIC', data: buildApicFrame(currentArt) });
+        localRawFrames.push({ id: 'APIC', data: buildApicFrame(currentArt) });
       }
       const audio = currentBuffer.slice(parsedMeta.headerSize);
-      out = writeId3(audio, tags, parsedMeta.rawFrames);
+      out = writeId3(audio, tags, localRawFrames);
       mime = 'audio/mpeg';
     }
     const a = Object.assign(document.createElement('a'), {
