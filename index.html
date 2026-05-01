@@ -472,9 +472,9 @@ function writeFlac(buffer, tags, meta) {
   }
 
   // Replace existing Vorbis Comment block in-place
-  Logger.log('SAVE', `replacing block at offset=${blockOffset}, old size=${oldTotal}, new size=${newTotal}`);
   const oldTotal = 4 + blockLength;   // old block header + data
   const newTotal = 4 + newDataSize;   // new block header + data
+  Logger.log('SAVE', `replacing block at offset=${blockOffset}, old size=${oldTotal}, new size=${newTotal}`);
   const out = new Uint8Array(buffer.byteLength - oldTotal + newTotal);
   const outView = new DataView(out.buffer);
 
