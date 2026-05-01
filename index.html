@@ -1452,6 +1452,14 @@ function parseAudioInfo(buffer, format) {
 
   } else if (format === 'm4a') {
     // Walk atoms to find mvhd (duration/timescale) and mp4a (channels, sample rate)
+    /**
+     * Iterate over sibling MP4 atoms in a byte range, invoking a callback for each.
+     * Each atom begins with a 4-byte big-endian size followed by a 4-byte ASCII type code.
+     * Stops early if an atom's size is invalid (< 8 bytes or extends past endOff).
+     * @param {number} startOff - Byte offset to start scanning (inclusive)
+     * @param {number} endOff   - Byte offset to stop scanning (exclusive)
+     * @param {function(string, number, number): void} cb - Called as cb(type, offset, size) for each atom
+     */
     function walkAtoms(startOff, endOff, cb) {
       let off = startOff;
       while (off + 8 <= endOff) {
@@ -1462,6 +1470,14 @@ function parseAudioInfo(buffer, format) {
         off += size;
       }
     }
+    /**
+     * Find the first atom of a given type within a byte range.
+     * Scans only the immediate children (non-recursive); does not descend into containers.
+     * @param {number} startOff - Byte offset to start scanning (inclusive)
+     * @param {number} endOff   - Byte offset to stop scanning (exclusive)
+     * @param {string} target   - 4-character atom type to find (e.g. 'moov', 'mvhd')
+     * @returns {{off: number, size: number}|null} Atom position and size, or null if not found
+     */
     function findAtom(startOff, endOff, target) {
       let found = null;
       walkAtoms(startOff, endOff, (type, off, size) => { if (type === target) found = {off, size}; });
